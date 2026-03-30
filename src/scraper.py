@@ -106,8 +106,6 @@ class ScrapingPaused(Exception):
 class BsToScraper:
     """BS.TO series scraper powered by httpx (no browser needed)."""
 
-    _stale_cleaned = False
-
     def __init__(self):
         self.series_data: list[dict] = []
         self.all_discovered_series: list[dict] | None = None
@@ -124,6 +122,7 @@ class BsToScraper:
         self._lock = threading.Lock()
         self._last_pause_check = 0.0
         self._pause_cached = False
+        self.paused = False
 
     # ── Static / class methods ──────────────────────────────────────────────
 
@@ -352,7 +351,7 @@ class BsToScraper:
             if not title or title.lower().strip() in _UTILITY_PAGES:
                 continue
             slug = href.split("/")[1] if "/" in href else href
-            if slug in seen_slugs:
+            if not slug or slug in seen_slugs:
                 continue
             seen_slugs.add(slug)
             series.append({
@@ -457,6 +456,13 @@ class BsToScraper:
                         "link": info.get("link", ""),
                     })
                 else:
+                    if result["total_episodes"] == 0:
+                        self.failed_links.append({
+                            "url": info["url"],
+                            "title": result.get("title", info.get("title", "")),
+                            "link": info.get("link", ""),
+                            "reason": "zero_episodes",
+                        })
                     results.append(result)
 
                 link = info.get("link", "")
@@ -488,7 +494,7 @@ class BsToScraper:
 
                 if done % CHECKPOINT_EVERY == 0:
                     self.series_data = list(results)
-                    self.save_checkpoint()
+                    self.save_checkpoint(include_data=True)
         finally:
             await client.aclose()
 
@@ -535,7 +541,17 @@ class BsToScraper:
         """Async core of run()."""
         # Use a temp client for discovery, then close it
         tmp = await self._create_logged_in_client()
-        print("✓ Logged in to bs.to")
+        try:
+            print("✓ Logged in to bs.to")
+            await self._async_run_inner(tmp, single_url=single_url,
+                                        url_list=url_list, new_only=new_only,
+                                        retry_failed=retry_failed)
+        finally:
+            if not tmp.is_closed:
+                await tmp.aclose()
+
+    async def _async_run_inner(self, tmp, single_url=None, url_list=None,
+                               new_only=False, retry_failed=False):
 
         if single_url:
             self._checkpoint_mode = 'single'
@@ -591,6 +607,9 @@ class BsToScraper:
             if not new_list:
                 print("✓ No new series detected — nothing to scrape")
                 return
+            if len(new_list) <= 50:
+                for s in new_list:
+                    print(f"  + {s['title']}")
             await self._scrape_list(new_list, num_workers=1)
             return
 
@@ -602,6 +621,18 @@ class BsToScraper:
         self.all_discovered_series = all_series
         ignored_slugs = self.get_ignored_slugs()
         print(f"✓ Found {len(all_series)} series")
+
+        # New series detection
+        existing_slugs = self.load_existing_slugs()
+        new_titles = [s["title"] for s in all_series
+                      if self.get_series_slug_from_url(s.get('link', '')) not in existing_slugs
+                      and self.get_series_slug_from_url(s.get('link', '')) not in ignored_slugs]
+        if new_titles:
+            print(f"\nℹ {len(new_titles)} new series detected:")
+            for t in new_titles:
+                print(f"  + {t}")
+            print()
+
         if ignored_slugs:
             all_series = [s for s in all_series
                           if self.get_series_slug_from_url(s.get('link', '')) not in ignored_slugs]
@@ -654,6 +685,7 @@ class BsToScraper:
                 self.save_failed_series()
 
         except ScrapingPaused:
+            self.paused = True
             self._clear_pause_file()
             self.save_checkpoint(include_data=True)
             if self.failed_links:
@@ -664,6 +696,4 @@ class BsToScraper:
                 self.save_failed_series()
             raise
 
-    def close(self):
-        """No-op: httpx sessions are closed after each run."""
-        pass
+

@@ -12,7 +12,6 @@ import logging
 import logging.handlers
 import os
 import re
-import subprocess
 import sys
 from urllib.parse import urlparse
 
@@ -181,8 +180,11 @@ def _run_scrape_and_save(run_kwargs, description, success_msg, no_data_msg):
             print(f"\n⚠ {no_data_msg}")
             logger.warning(no_data_msg)
 
-        # Scraping completed normally — safe to clear checkpoint now that user has confirmed/declined
-        scraper.clear_checkpoint()
+        # Only clear checkpoint if scraping completed (not paused)
+        if not scraper.paused:
+            scraper.clear_checkpoint()
+        else:
+            print("\n⚠ Scraping was paused — checkpoint preserved for resume.")
 
         if scraper.failed_links:
             print(f"\n⚠ {len(scraper.failed_links)} series failed during scraping.")
