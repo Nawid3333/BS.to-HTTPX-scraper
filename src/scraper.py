@@ -369,6 +369,13 @@ class BsToScraper:
             return self._error_result(info, str(e))
 
         html = resp.text
+
+        # Detect "Serie nicht gefunden!" error box (site returns 200 but series doesn't exist)
+        soup_check = BeautifulSoup(html, "html.parser")
+        error_box = soup_check.select_one("div.messageBox.error")
+        if error_box and "nicht gefunden" in error_box.get_text(strip=True).lower():
+            return self._error_result(info, "serie_not_found")
+
         title = _extract_title(html) or info["title"]
         if title.lower().strip() in _UTILITY_PAGES:
             return self._error_result(info, "utility page")
