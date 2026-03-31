@@ -1,3 +1,5 @@
+"""Configuration for the BS.TO series scraper."""
+
 import os
 from dotenv import load_dotenv
 
@@ -18,4 +20,5 @@ os.makedirs(LOGS_DIR, exist_ok=True)
 LOG_FILE = os.path.join(LOGS_DIR, "bs_to_backup.log")
 
 # Scraping configuration
-NUM_WORKERS = 24  # Number of parallel httpx sessions (1 = sequential, 12+ = fast)
+# Number of parallel httpx sessions (1 = sequential, 12+ = fast)
+NUM_WORKERS = 24
