@@ -8,6 +8,7 @@ from collections import defaultdict
 from datetime import datetime
 
 from config.config import SERIES_INDEX_FILE, DATA_DIR
+from src.scraper import BsToScraper
 
 logger = logging.getLogger(__name__)
 
@@ -213,18 +214,17 @@ def group_episodes_by_season(episode_list, new_data, prefix='[+]'):
 def _extract_slug(entry):
     """Extract series slug from an index entry's link or url field.
 
-    Looks for '/serie/' in the value and returns the next path segment.
+    Delegates to BsToScraper.get_series_slug_from_url for consistency.
     Returns None if extraction fails.
     """
+    if not isinstance(entry, dict):
+        return None
     for field in ('link', 'url'):
-        value = entry.get(field, '') if isinstance(entry, dict) else ''
+        value = entry.get(field, '')
         if not value or not isinstance(value, str):
             continue
-        idx = value.find('/serie/')
-        if idx == -1:
-            continue
-        slug = value[idx + len('/serie/'):].strip('/').split('/')[0]
-        if slug:
+        slug = BsToScraper.get_series_slug_from_url(value)
+        if slug and slug != 'unknown':
             return slug
     return None
 
@@ -269,14 +269,15 @@ def show_vanished_series(old_data, all_discovered_slugs, scrape_scope):
         logger.warning(f"Corrupt URL data in {len(corrupt_entries)} index entries: {corrupt_entries[:5]}")
 
     if vanished:
-        print(f"\n{'\u2500'*70}")
+        separator = '\u2500' * 70
+        print(f"\n{separator}")
         print(f"  [INFO] {len(vanished)} previously indexed series NOT found in current scrape:")
-        print(f"{'\u2500'*70}")
+        print(separator)
         for title in vanished[:20]:
             print(f"  \u2022 {title}  (not found on bs.to)")
         if len(vanished) > 20:
             print(f"  ... and {len(vanished) - 20} more")
-        print(f"{'\u2500'*70}")
+        print(separator)
         print("  These series are preserved unchanged in the index.")
         logger.info(f"Vanished series notification: {len(vanished)} series not found in scrape scope '{scrape_scope}'")
 
@@ -424,32 +425,42 @@ def show_changes(changes, include_unwatched=True, include_watched=True, new_data
     return total
 
 
-def _load_existing_index():
-    """Load the current series index from disk (list or empty list)."""
+def _read_index_json():
+    """Read and parse series_index.json from disk.
+
+    Returns the raw parsed data (list or dict), or None on any error.
+    Handles missing file, corrupt JSON, and I/O errors.
+    """
     if not os.path.exists(SERIES_INDEX_FILE):
         logger.info(f"No existing index found at {SERIES_INDEX_FILE}")
-        return []
+        return None
     try:
         with open(SERIES_INDEX_FILE, 'r', encoding='utf-8') as f:
             data = json.load(f)
         if not isinstance(data, (list, dict)):
             print("\u26a0 Index file is not a valid list or dict, ignoring.")
             logger.error("Index file is not a valid list or dict.")
-            return []
+            return None
         logger.info(f"Loaded index from {SERIES_INDEX_FILE} ({len(data)} entries)")
         return data
     except json.JSONDecodeError as e:
         print(f"[ERROR] Index file corrupted: {e}")
         logger.error(f"Index file corrupted: {e}")
-        return []
+        return None
     except OSError as e:
         print(f"[ERROR] Cannot read index file: {e}")
         logger.error(f"Cannot read index file: {e}")
-        return []
+        return None
     except Exception as e:
         print(f"\u26a0 Error loading index: {str(e)}")
         logger.error(f"Error loading index: {str(e)}")
-        return []
+        return None
+
+
+def _load_existing_index():
+    """Load the current series index from disk (list or empty list)."""
+    data = _read_index_json()
+    return data if data is not None else []
 
 
 def _prompt_watch_status_changes(changes, new_dict):
@@ -543,7 +554,7 @@ def _merge_series_data(old_data, new_dict, allow_watched, allow_unwatched):
                         else:
                             new_ep['watched'] = old_watched
                     old_eps[ep_num] = new_ep  # update existing or add new
-                old_seasons[season_label]['episodes'] = list(old_eps.values())
+                old_seasons[season_label]['episodes'] = sorted(old_eps.values(), key=lambda e: e.get('number', 0))
             else:
                 old_seasons[season_label] = new_season
 
@@ -572,6 +583,16 @@ def confirm_and_save_changes(new_data, description="data"):
     changes = detect_changes(old_data, new_dict)
     logger.info(f"Detected changes: { {k: len(v) for k,v in changes.items()} }")
 
+    # Show full change summary first so the user sees the big picture
+    total_detected = sum(len(v) for v in changes.values())
+    if total_detected == 0:
+        print(f"\n\u2713 {description} already up to date.")
+        logger.info(f"No changes to save for {description}.")
+        return True
+
+    show_changes(changes, include_unwatched=True, include_watched=True, new_data=new_dict)
+
+    # Now prompt for watched/unwatched decisions with full context
     allow_watched, allow_unwatched = _prompt_watch_status_changes(changes, new_dict)
 
     if not allow_watched:
@@ -581,7 +602,7 @@ def confirm_and_save_changes(new_data, description="data"):
 
     merged = _merge_series_data(old_data, new_dict, allow_watched, allow_unwatched)
 
-    # Count remaining changes
+    # Count remaining changes after user decisions
     main_changes = sum(len(v) for k, v in changes.items() if k != 'newly_unwatched')
     if allow_unwatched:
         main_changes += len(changes['newly_unwatched'])
@@ -590,8 +611,6 @@ def confirm_and_save_changes(new_data, description="data"):
         print(f"\n\u2713 {description} already up to date.")
         logger.info(f"No changes to save for {description}.")
         return True
-
-    show_changes(changes, include_unwatched=allow_unwatched, include_watched=allow_watched, new_data=new_dict)
 
     if input(f"\nSave these changes? (y/n): ").strip().lower() != 'y':
         print("\u2717 Changes discarded. Nothing saved.")
@@ -626,13 +645,10 @@ class IndexManager:
         Validates loaded data for consistency.
         """
         self.series_index = {}
-        if not os.path.exists(SERIES_INDEX_FILE):
-            logger.info(f"No existing index found at {SERIES_INDEX_FILE}")
+        data = _read_index_json()
+        if data is None:
             return
         try:
-            with open(SERIES_INDEX_FILE, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-            
             # Handle both formats robustly
             if isinstance(data, list):
                 self.series_index = {item.get("title"): item for item in data if item.get("title")}
@@ -653,15 +669,6 @@ class IndexManager:
             self.series_index = validated
             
             print(f"[OK] Loaded {len(self.series_index)} series from index")
-            logger.info(f"Loaded {len(self.series_index)} series from {SERIES_INDEX_FILE}")
-        except json.JSONDecodeError as e:
-            print(f"[ERROR] Index file corrupted: {e}")
-            logger.error(f"Index file corrupted: {e}")
-            self.series_index = {}
-        except OSError as e:
-            print(f"[ERROR] Cannot read index file: {e}")
-            logger.error(f"Cannot read index file: {e}")
-            self.series_index = {}
         except Exception as e:
             print(f"[WARN] Error loading index: {str(e)}")
             logger.error(f"Error loading index: {str(e)}")

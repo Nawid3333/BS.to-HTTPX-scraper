@@ -296,7 +296,8 @@ class BsToScraper:
 
     # ── URL helpers ─────────────────────────────────────────────────────────
 
-    def get_series_slug_from_url(self, url):
+    @staticmethod
+    def get_series_slug_from_url(url):
         try:
             path = urlparse(url).path if url.startswith('http') else url
             parts = path.split('/')
@@ -308,7 +309,8 @@ class BsToScraper:
         except Exception:
             return 'unknown'
 
-    def normalize_to_series_url(self, url):
+    @staticmethod
+    def normalize_to_series_url(url):
         if not url:
             return url
         url = url.split('?')[0].split('#')[0]
@@ -365,6 +367,8 @@ class BsToScraper:
         soup = BeautifulSoup(resp.text, "html.parser")
         token_input = soup.find("input", {"name": "security_token"})
         token = token_input["value"] if token_input else ""
+        if not token:
+            logger.warning("CSRF security_token not found on login page")
 
         login_resp = await client.post(LOGIN_URL, data={
             "login[user]": USERNAME,
@@ -503,13 +507,27 @@ class BsToScraper:
                 except asyncio.QueueEmpty:
                     break
 
-                result = await self._scrape_one_series(client, info)
+                try:
+                    result = await self._scrape_one_series(client, info)
+                except ScrapingPaused:
+                    raise
+                except Exception as exc:
+                    logger.error(f"Worker {worker_id} unexpected error on {info.get('url', '?')}: {exc}")
+                    self.failed_links.append({
+                        "url": info["url"],
+                        "title": info.get("title", ""),
+                        "link": info.get("link", ""),
+                        "reason": f"unexpected_error: {exc}",
+                    })
+                    progress["done"] += 1
+                    continue
 
                 if result["title"].startswith("[ERROR"):
                     self.failed_links.append({
                         "url": info["url"],
                         "title": info.get("title", ""),
                         "link": info.get("link", ""),
+                        "reason": result["title"],
                     })
                 else:
                     if result["total_episodes"] == 0:
@@ -585,10 +603,17 @@ class BsToScraper:
         print(f"→ Scraping {len(filtered)} series with {n} session(s)...")
 
         tasks = [
-            self._worker(i, queue, results, progress, len(filtered))
+            asyncio.create_task(self._worker(i, queue, results, progress, len(filtered)))
             for i in range(n)
         ]
-        await asyncio.gather(*tasks)
+        try:
+            await asyncio.gather(*tasks)
+        except ScrapingPaused:
+            for t in tasks:
+                t.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            self.series_data = results
+            raise
 
         self.series_data = results
 
@@ -666,7 +691,7 @@ class BsToScraper:
             if len(new_list) <= 50:
                 for s in new_list:
                     print(f"  + {s['title']}")
-            await self._scrape_list(new_list, num_workers=1)
+            await self._scrape_list(new_list, num_workers=NUM_WORKERS if self._use_parallel else 1)
             return
 
         # Default: scrape all

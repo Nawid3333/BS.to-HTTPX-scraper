@@ -18,9 +18,9 @@ from urllib.parse import urlparse
 # Ensure project root is on sys.path so imports work from any working directory
 sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
 
-from config.config import USERNAME, PASSWORD, DATA_DIR, LOG_FILE
+from config.config import USERNAME, PASSWORD, DATA_DIR, LOG_FILE, NUM_WORKERS
 from src.scraper import BsToScraper
-from src.index_manager import IndexManager, confirm_and_save_changes, show_vanished_series
+from src.index_manager import IndexManager, confirm_and_save_changes, show_vanished_series, get_episode_counts
 
 # Logging
 logging.basicConfig(
@@ -41,6 +41,7 @@ _SERIE_URL_RE = re.compile(r'/serie/[^/]+')
 _MODE_LABELS = {
     'all_series': 'Scrape all series',
     'new_only': 'Scrape new series only',
+    'unwatched': 'Scrape unwatched series',
     'single': 'Add single series by URL',
     'batch': 'Batch add from file',
     'retry': 'Retry failed series',
@@ -105,12 +106,13 @@ def show_menu():
     print("\nOptions:")
     print("  1. Scrape series from bs.to (requires login)")
     print("  2. Scrape only NEW series (faster)")
-    print("  3. Add single series by URL")
+    print("  3. Scrape unwatched series")
     print("  4. Generate full report")
     print("  5. Batch add series from text file")
     print("  6. Retry failed series from last run")
-    print("  7. Pause current scraping (in another terminal)")
-    print("  8. Exit\n")
+    print("  7. Add single series by URL")
+    print("  8. Pause current scraping (in another terminal)")
+    print("  9. Exit\n")
 
 
 def _check_checkpoint(expected_mode):
@@ -156,6 +158,7 @@ def _check_checkpoint(expected_mode):
 
 def _run_scrape_and_save(run_kwargs, description, success_msg, no_data_msg):
     """Create scraper, run, confirm & save. Returns the scraper or None on error."""
+    scraper = None
     try:
         scraper = BsToScraper()
         scraper.run(**run_kwargs)
@@ -193,14 +196,14 @@ def _run_scrape_and_save(run_kwargs, description, success_msg, no_data_msg):
         return scraper
     except (KeyboardInterrupt, SystemExit):
         print(f"\n⚠ Scraping interrupted by Ctrl+C")
-        if 'scraper' in locals() and scraper.series_data:
+        if scraper is not None and scraper.series_data:
             if confirm_and_save_changes(scraper.series_data, description):
                 print(f"\n✓ Partial data saved ({len(scraper.series_data)} series)")
                 logger.info(f"{description} interrupted — partial data saved")
-        if 'scraper' in locals() and scraper.failed_links:
+        if scraper is not None and scraper.failed_links:
             print(f"\n⚠ {len(scraper.failed_links)} series failed.")
             print("→ Use option 6 (Retry failed series) to rescrape these later.")
-        return scraper if 'scraper' in locals() else None
+        return scraper
     except OSError as e:
         print(f"\n✗ Network error occurred: {str(e)}")
         logger.error(f"Network error in {description}: {e}")
@@ -222,7 +225,7 @@ def scrape_series():
 
     print("\nScraping mode:")
     print("  1. Single session (slower, but most reliable)")
-    print("  2. Multi-session (faster, 12 parallel sessions)")
+    print(f"  2. Multi-session (faster, {NUM_WORKERS} parallel sessions)")
     print("  0. Back\n")
     mode_choice = input("Choose mode (0-2) [default: 2]: ").strip() or '2'
 
@@ -255,6 +258,60 @@ def scrape_new_series():
         description="New series data",
         success_msg="New series scraping completed successfully!",
         no_data_msg="No new series found",
+    )
+
+
+def scrape_unwatched():
+    """Scrape only unwatched/ongoing/unstarted series from the existing index."""
+    print("\n→ Scrape unwatched series (skipping fully watched)...\n")
+
+    index_manager = IndexManager()
+    if not index_manager.series_index:
+        print("✗ No series in index. Run a full scrape first (option 1).")
+        return
+
+    unwatched_urls = []
+    skipped = 0
+    for series in index_manager.series_index.values():
+        total, watched = get_episode_counts(series)
+        if total > 0 and watched >= total:
+            skipped += 1
+        else:
+            url = series.get('url')
+            if url:
+                unwatched_urls.append(url)
+
+    if not unwatched_urls:
+        print("✓ All series are fully watched! Nothing to scrape.")
+        return
+
+    print(f"  Found {len(unwatched_urls)} unwatched/ongoing series (skipping {skipped} fully watched)\n")
+
+    chk = _check_checkpoint('unwatched')
+    if not chk['ok']:
+        print("✗ Cancelled")
+        return
+    resume = chk['resume']
+
+    print("\nScraping mode:")
+    print("  1. Single session (slower, but most reliable)")
+    print(f"  2. Multi-session (faster, {NUM_WORKERS} parallel sessions)")
+    print("  0. Back\n")
+    mode_choice = input("Choose mode (0-2) [default: 2]: ").strip() or '2'
+
+    if mode_choice == '0':
+        return
+    if mode_choice not in ['1', '2']:
+        print("⚠ Invalid choice, using default (multi-session)")
+        use_parallel = True
+    else:
+        use_parallel = mode_choice == '2'
+
+    _run_scrape_and_save(
+        run_kwargs=dict(url_list=unwatched_urls, resume_only=resume, parallel=use_parallel),
+        description=f"Unwatched series scrape ({len(unwatched_urls)} series)",
+        success_msg=f"Unwatched series scraping completed! ({len(unwatched_urls)} series)",
+        no_data_msg="No data scraped",
     )
 
 
@@ -499,16 +556,16 @@ def main():
     
     while True:
         show_menu()
-        choice = input("Enter your choice (1-8): ").strip()
-        if not choice.isdigit() or not (1 <= int(choice) <= 8):
-            print("✗ Invalid choice. Please enter a number between 1 and 8.")
+        choice = input("Enter your choice (1-9): ").strip()
+        if not choice.isdigit() or not (1 <= int(choice) <= 9):
+            print("✗ Invalid choice. Please enter a number between 1 and 9.")
             continue
         if choice == '1':
             scrape_series()
         elif choice == '2':
             scrape_new_series()
         elif choice == '3':
-            add_series_by_url()
+            scrape_unwatched()
         elif choice == '4':
             generate_report()
         elif choice == '5':
@@ -516,8 +573,10 @@ def main():
         elif choice == '6':
             retry_failed_series()
         elif choice == '7':
-            pause_scraping()
+            add_series_by_url()
         elif choice == '8':
+            pause_scraping()
+        elif choice == '9':
             print("\n✓ Goodbye!\n")
             break
 
