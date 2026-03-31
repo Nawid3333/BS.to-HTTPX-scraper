@@ -36,6 +36,41 @@ _SERIE_PATH_RE = re.compile(r'(/serie/[^/]+)')
 _UTILITY_PAGES = {'alle serien', 'andere serien', 'beliebte serien',
                   'neue serien', 'empfehlung', 'meistgesehen'}
 
+# Error page detection
+_ERROR_TITLE_RE = re.compile(
+    r'^(?:Error\s+)?(?P<code>\d{3})\b|\b(?:Error|Fehler)\s+(?P<code2>\d{3})\b',
+    re.IGNORECASE,
+)
+_SERVER_ERROR_CODES = {'429', '500', '502', '503', '504'}
+
+
+def _is_logged_in(html: str) -> bool:
+    """Check if the page indicates a logged-in session."""
+    soup = BeautifulSoup(html, "html.parser")
+    nav = soup.select_one("section.navigation")
+    return nav is not None and nav.find("a", href="logout") is not None
+
+
+def _check_error_page(html: str) -> str | None:
+    """Detect HTTP error pages (404, 502, etc.) returned as HTML."""
+    soup = BeautifulSoup(html, "html.parser")
+    # If the page has series content (season nav), it's a real series page
+    if soup.select_one("#seasons a"):
+        return None
+    # Check for bs.to-specific error box
+    error_box = soup.select_one("div.messageBox.error")
+    if error_box:
+        text = error_box.get_text(strip=True).lower()
+        if 'nicht gefunden' in text:
+            return '404'
+    title_tag = soup.find("title")
+    if title_tag:
+        title_text = title_tag.get_text(strip=True)
+        m = _ERROR_TITLE_RE.search(title_text)
+        if m:
+            return m.group("code") or m.group("code2")
+    return None
+
 
 # ── HTML helpers ────────────────────────────────────────────────────────────
 
@@ -51,11 +86,15 @@ def _parse_episodes(html: str) -> list[dict]:
             continue
         ep_num = cols[0].get_text(strip=True)
         if not ep_num:
-            ep_num = row.get("data-episode-season-id", "") or str(idx)
+            ep_num = row.get("data-episode-season-id", "")
+        if not ep_num:
+            logger.warning(f"Could not determine episode number for row {idx}")
+            return None
         try:
             ep_num_int = int(ep_num)
         except ValueError:
-            ep_num_int = idx
+            logger.warning(f"Non-numeric episode number '{ep_num}' in row {idx}")
+            return None
         title_tag = cols[1].find("strong")
         title = title_tag.get_text(strip=True) if title_tag else cols[1].get_text(strip=True)
         watched = "watched" in (row.get("class") or [])
@@ -341,6 +380,8 @@ class BsToScraper:
 
     async def _get_all_series(self, client: httpx.AsyncClient) -> list[dict]:
         resp = await client.get(SERIES_LIST_URL)
+        if not _is_logged_in(resp.text):
+            raise RuntimeError("Not logged in — cannot fetch series catalogue")
         soup = BeautifulSoup(resp.text, "html.parser")
         series, seen_slugs = [], set()
         for a in soup.find_all("a", href=True):
@@ -370,11 +411,17 @@ class BsToScraper:
 
         html = resp.text
 
-        # Detect "Serie nicht gefunden!" error box (site returns 200 but series doesn't exist)
-        soup_check = BeautifulSoup(html, "html.parser")
-        error_box = soup_check.select_one("div.messageBox.error")
-        if error_box and "nicht gefunden" in error_box.get_text(strip=True).lower():
-            return self._error_result(info, "serie_not_found")
+        # Detect error pages (404, 502, etc.) before parsing content
+        error_code = _check_error_page(html)
+        if error_code:
+            reason = f"{error_code} server error" if error_code in _SERVER_ERROR_CODES else f"{error_code} error page"
+            logger.warning(f"Error page detected for {url}: {error_code}")
+            return self._error_result(info, reason)
+
+        # Verify still logged in
+        if not _is_logged_in(html):
+            logger.error(f"Session expired while scraping {url}")
+            return self._error_result(info, "session expired — not logged in")
 
         title = _extract_title(html) or info["title"]
         if title.lower().strip() in _UTILITY_PAGES:
@@ -382,7 +429,7 @@ class BsToScraper:
 
         season_links = _extract_season_links(html, url)
         if not season_links:
-            season_links = [("1", url)]
+            return self._error_result(info, "no seasons found")
 
         seasons_data = []
         total_watched, total_eps = 0, 0
@@ -390,9 +437,11 @@ class BsToScraper:
         for label, season_url in season_links:
             try:
                 sr = await client.get(season_url, follow_redirects=True)
-            except httpx.HTTPError:
-                continue
+            except httpx.HTTPError as e:
+                return self._error_result(info, f"season {label} fetch failed: {e}")
             episodes = _parse_episodes(sr.text)
+            if episodes is None:
+                return self._error_result(info, f"season {label} episode parse failed")
             watched_count = sum(1 for ep in episodes if ep["watched"])
             total_count = len(episodes)
             seasons_data.append({
@@ -636,8 +685,10 @@ class BsToScraper:
                       and self.get_series_slug_from_url(s.get('link', '')) not in ignored_slugs]
         if new_titles:
             print(f"\nℹ {len(new_titles)} new series detected:")
-            for t in new_titles:
+            for t in new_titles[:10]:
                 print(f"  + {t}")
+            if len(new_titles) > 10:
+                print(f"  ... and {len(new_titles) - 10} more")
             print()
 
         if ignored_slugs:
