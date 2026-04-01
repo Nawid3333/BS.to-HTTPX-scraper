@@ -21,4 +21,4 @@ LOG_FILE = os.path.join(LOGS_DIR, "bs_to_backup.log")
 
 # Scraping configuration
 # Number of parallel httpx sessions (1 = sequential, 12+ = fast)
-NUM_WORKERS = 24
+NUM_WORKERS = 12

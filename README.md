@@ -5,14 +5,17 @@ Uses **httpx** (no browser needed) with a multi-session architecture for fast, p
 
 ## Features
 
-- **Multi-session parallel scraping** — 24 concurrent httpx sessions by default (configurable)
-- **Checkpoint & resume** — automatically saves progress; resume after interruptions (Ctrl+C safe)
+- **Multi-session parallel scraping** — 12 concurrent httpx sessions by default (configurable)
+- **Checkpoint & resume** — automatically saves progress every 10 series; resume after interruptions (Ctrl+C safe)
 - **New series detection** — detects newly added series on your account and lists them before scraping
 - **Vanished series detection** — alerts when series disappear from your account
+- **Ignored series** — skip specific series via `.ignored_series.json`
 - **Batch URL import** — import series from a text file
 - **Failed series retry** — automatically tracks failures for later bulk retry
 - **Pause/resume** — create a `.pause_scraping` file to gracefully pause workers
 - **Report generation** — full statistics with ongoing series export
+- **Atomic file writes** — all JSON writes use temp file + replace to prevent corruption
+- **File locking** — prevents concurrent access corruption
 - **Disk space check** — warns before scraping if free space is below 100 MB
 - **Rotating log files** — 10 MB per file, 5 backups
 
@@ -39,7 +42,7 @@ BS_PASSWORD=yourpassword
 Scraping parallelism can be adjusted in `config/config.py`:
 
 ```python
-NUM_WORKERS = 24  # Number of parallel httpx sessions
+NUM_WORKERS = 12  # Number of parallel httpx sessions
 ```
 
 ## Usage
@@ -50,21 +53,22 @@ python main.py
 
 ### Menu Options
 
-| # | Option | Description |
-|---|--------|-------------|
-| 1 | **Scrape series from bs.to** | Full scrape of all watched series. Choose single-session or multi-session mode. |
-| 2 | **Scrape NEW series only** | Scrapes only series not yet in the index (faster). |
-| 3 | **Add single series by URL** | Add one series by pasting its bs.to URL. |
-| 4 | **Generate full report** | Statistics report saved to JSON with ongoing series export. |
-| 5 | **Batch add from file** | Import multiple series from a text file. |
-| 6 | **Retry failed series** | Bulk retry all series that failed in previous runs. |
-| 7 | **Pause scraping** | Creates `.pause_scraping` flag file for graceful worker pause. |
-| 8 | **Exit** | Clean exit. |
+| #   | Option                              | Description                                                                |
+| --- | ----------------------------------- | -------------------------------------------------------------------------- |
+| 1   | **Scrape series from bs.to**        | Full scrape of all watched series. Choose single-session or multi-session. |
+| 2   | **Scrape only NEW series**          | Scrapes only series not yet in the index (faster).                         |
+| 3   | **Scrape unwatched series**         | Skips fully watched series; focuses on ongoing/partial.                    |
+| 4   | **Generate full report**            | Statistics report saved to JSON with ongoing series export.                |
+| 5   | **Batch add series from text file** | Import multiple series from a text file.                                   |
+| 6   | **Retry failed series**             | Bulk retry all series that failed in previous runs.                        |
+| 7   | **Add single series by URL**        | Add one series by pasting its bs.to URL.                                   |
+| 8   | **Pause scraping**                  | Creates `.pause_scraping` flag file for graceful worker pause.             |
+| 9   | **Exit**                            | Clean exit.                                                                |
 
 ### Scraping Modes (Option 1)
 
 1. **Single session** — one httpx client, sequential (most reliable)
-2. **Multi-session** — 12+ parallel workers (default, faster)
+2. **Multi-session** — 12 parallel workers (default, faster)
 
 ### Batch File Format (Option 5)
 
@@ -78,6 +82,7 @@ https://bs.to/serie/Better-Call-Saul
 ### Reports (Option 4)
 
 Reports include:
+
 - Total series, completed, ongoing, not started counts
 - Episode counts and completion percentages
 - Most recently updated series status
@@ -96,7 +101,9 @@ After report generation, you can export ongoing series URLs back to `series_urls
 │   └── .env                    # Credentials (not committed)
 ├── data/
 │   ├── series_index.json       # Main series database
+│   ├── series_index.json.bak*  # 3 backup generations (auto-managed)
 │   ├── series_report.json      # Generated report
+│   ├── .ignored_series.json    # Series to skip during scraping
 │   ├── .scrape_checkpoint.json # Resume checkpoint (auto-managed)
 │   ├── .failed_series.json     # Failed series list (auto-managed)
 │   └── .pause_scraping         # Pause flag file (auto-managed)
