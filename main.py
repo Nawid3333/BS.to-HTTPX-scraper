@@ -66,7 +66,7 @@ def print_header():
     print("="*60 + "\n")
 
 
-def print_scraped_series_status():
+def print_scraped_series_status(changes=None):
     """Print episode counts for the most recently updated series."""
     try:
         index_manager = IndexManager()
@@ -86,6 +86,14 @@ def print_scraped_series_status():
             reverse=True
         )
 
+        # Build per-title new episode counts from changes
+        new_ep_counts = {}
+        if changes and changes.get('new_episodes'):
+            for title, _season, _ep in changes['new_episodes']:
+                new_ep_counts[title] = (
+                    new_ep_counts.get(title, 0) + 1
+                )
+
         display_count = min(5, len(sorted_series))
         if display_count > 0:
             print("\n" + "-"*70)
@@ -94,9 +102,6 @@ def print_scraped_series_status():
             for s in sorted_series[:display_count]:
                 watched = s.get('watched_episodes', 0)
                 total = s.get('total_episodes', 0)
-                pct = round(
-                    (watched / total * 100), 1
-                ) if total else 0
                 season_labels = [
                     str(sn.get('season', '?'))
                     for sn in s.get('seasons', [])
@@ -105,9 +110,15 @@ def print_scraped_series_status():
                     f" [{','.join(season_labels)}]"
                     if season_labels else ""
                 )
+                title = s.get('title', '')
+                new_count = new_ep_counts.get(title, 0)
+                new_info = (
+                    f" ({new_count} new episodes)"
+                    if new_count > 0 else ""
+                )
                 print(
-                    f"  \u2022 {s.get('title')}{season_info}:"
-                    f" {watched}/{total} episodes ({pct}%)"
+                    f"  \u2022 {title}{season_info}:"
+                    f" {watched}/{total}{new_info}"
                 )
     except Exception:  # pylint: disable=broad-exception-caught
         logger.exception("Error printing series status")
@@ -221,11 +232,12 @@ def _run_scrape_and_save(  # pylint: disable=too-many-branches
                     idx_mgr.series_index, all_slugs, scope,
                 )
 
-            if confirm_and_save_changes(
+            saved, changes = confirm_and_save_changes(
                 scraper.series_data, description,
-            ):
+            )
+            if saved:
                 print(f"\n\u2713 {success_msg}")
-                print_scraped_series_status()
+                print_scraped_series_status(changes)
                 logger.info(success_msg)
         else:
             print(f"\n\u26a0 {no_data_msg}")
@@ -253,9 +265,10 @@ def _run_scrape_and_save(  # pylint: disable=too-many-branches
     except (KeyboardInterrupt, SystemExit):
         print("\n\u26a0 Scraping interrupted by Ctrl+C")
         if scraper is not None and scraper.series_data:
-            if confirm_and_save_changes(
+            saved, changes = confirm_and_save_changes(
                 scraper.series_data, description,
-            ):
+            )
+            if saved:
                 count = len(scraper.series_data)
                 print(
                     f"\n\u2713 Partial data saved ({count} series)"

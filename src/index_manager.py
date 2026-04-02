@@ -825,7 +825,7 @@ def _merge_existing_series(  # pylint: disable=too-many-locals
 def confirm_and_save_changes(new_data, description="data"):
     """Show changes, prompt, merge, and save.
 
-    Returns True if saved.
+    Returns (saved: bool, changes: dict | None).
     """
     old_data = _load_existing_index()
 
@@ -848,7 +848,7 @@ def confirm_and_save_changes(new_data, description="data"):
         logger.info(
             "No changes to save for %s.", description,
         )
-        return True
+        return True, changes
 
     show_changes(
         changes, include_unwatched=True,
@@ -882,7 +882,7 @@ def confirm_and_save_changes(new_data, description="data"):
         logger.info(
             "No changes to save for %s.", description,
         )
-        return True
+        return True, changes
 
     answer = input(
         "\nSave these changes? (y/n): "
@@ -894,7 +894,7 @@ def confirm_and_save_changes(new_data, description="data"):
         logger.info(
             "User discarded changes. Nothing saved."
         )
-        return False
+        return False, None
 
     try:
         series_list = [
@@ -909,11 +909,11 @@ def confirm_and_save_changes(new_data, description="data"):
             "Saved %d series to %s",
             len(series_list), SERIES_INDEX_FILE,
         )
-        return True
+        return True, changes
     except Exception as exc:  # pylint: disable=broad-exception-caught
         print(f"\u2717 Failed to save: {exc}")
         logger.error("Failed to save index: %s", exc)
-        return False
+        return False, None
 
 
 class IndexManager:
