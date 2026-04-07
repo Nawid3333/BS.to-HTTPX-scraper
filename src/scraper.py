@@ -285,6 +285,9 @@ class BsToScraper:  # pylint: disable=too-many-instance-attributes
     def save_failed_series(self):
         """Persist failed series list to disk."""
         with self._lock:
+            ignored_urls = {
+                s.get('url') for s in self.load_ignored_series()
+            }
             existing = []
             try:
                 if os.path.exists(self.failed_file):
@@ -295,6 +298,12 @@ class BsToScraper:  # pylint: disable=too-many-instance-attributes
                         existing = json.load(f)
             except Exception:  # pylint: disable=broad-exception-caught
                 pass
+            # Drop any entries already on the ignore list
+            existing = [
+                e for e in existing
+                if isinstance(e, dict)
+                and e.get('url') not in ignored_urls
+            ]
             seen = {
                 e.get('url') for e in existing
                 if isinstance(e, dict)
@@ -303,6 +312,7 @@ class BsToScraper:  # pylint: disable=too-many-instance-attributes
                 if (
                     isinstance(entry, dict)
                     and entry.get('url') not in seen
+                    and entry.get('url') not in ignored_urls
                 ):
                     existing.append(entry)
                     seen.add(entry.get('url'))

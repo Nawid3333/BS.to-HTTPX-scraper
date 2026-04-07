@@ -282,12 +282,91 @@ def _extract_slug(entry):
     return None
 
 
+def remove_series_from_index(titles_to_remove):
+    """Remove series entries from series_index.json by title.
+
+    Loads the index, filters out entries whose title is in the
+    removal set, and atomically writes back.
+    Returns the number of entries actually removed.
+    """
+    if not titles_to_remove:
+        return 0
+    removal_set = set(titles_to_remove)
+    data = _read_index_json()
+    if data is None:
+        return 0
+
+    if isinstance(data, list):
+        filtered = [
+            entry for entry in data
+            if entry.get('title') not in removal_set
+        ]
+        removed = len(data) - len(filtered)
+    elif isinstance(data, dict):
+        filtered_dict = {
+            k: v for k, v in data.items()
+            if k not in removal_set
+        }
+        removed = len(data) - len(filtered_dict)
+        filtered = list(filtered_dict.values())
+    else:
+        return 0
+
+    if removed > 0:
+        _atomic_write_json(SERIES_INDEX_FILE, filtered)
+        logger.info(
+            "Removed %d vanished series from index: %s",
+            removed, list(removal_set)[:10],
+        )
+    return removed
+
+
+def _prompt_vanished_deletions(vanished_entries):
+    """Interactively prompt the user to delete vanished series.
+
+    Args:
+        vanished_entries: list of (title, url) tuples
+
+    Returns:
+        list of titles confirmed for deletion
+    """
+    to_delete = []
+    skip_all = False
+    delete_all = False
+
+    for i, (title, url) in enumerate(vanished_entries, 1):
+        if skip_all:
+            break
+        if delete_all:
+            to_delete.append(title)
+            continue
+
+        choice = (
+            input(
+                f"  [{i}/{len(vanished_entries)}] Delete "
+                f"\"{title}\" from index? "
+                "(y/n/a=all/s=skip all) [n]: "
+            ).strip().lower()
+            or 'n'
+        )
+        if choice == 'y':
+            to_delete.append(title)
+        elif choice == 'a':
+            to_delete.append(title)
+            delete_all = True
+        elif choice == 's':
+            skip_all = True
+
+    return to_delete
+
+
 def show_vanished_series(
     old_data, all_discovered_slugs, scrape_scope,
 ):
-    """Show notification about indexed series not found in scrape.
+    """Detect indexed series not found in the current scrape.
 
-    Purely informational - no index changes are made.
+    Shows vanished series and prompts the user to delete each one.
+    Confirmed deletions are removed from series_index.json.
 
     Args:
         old_data: dict of old series index (title -> series)
@@ -296,7 +375,7 @@ def show_vanished_series(
             None/other suppresses notification
 
     Returns:
-        list of vanished series titles, or empty list
+        list of vanished series titles that were kept
     """
     if scrape_scope not in ('all', 'new_only'):
         return []
@@ -311,7 +390,8 @@ def show_vanished_series(
             continue
 
         if slug not in all_discovered_slugs:
-            vanished.append(title)
+            url = entry.get('url', entry.get('link', ''))
+            vanished.append((title, url))
 
     if corrupt_entries:
         count = len(corrupt_entries)
@@ -340,22 +420,38 @@ def show_vanished_series(
             "series NOT found in current scrape:"
         )
         print(separator)
-        for title in vanished[:20]:
-            print(f"  \u2022 {title}  (not found on bs.to)")
-        if len(vanished) > 20:
-            print(f"  ... and {len(vanished) - 20} more")
+        for i, (title, url) in enumerate(vanished, 1):
+            print(f"  {i}. {title}  ({url})")
         print(separator)
-        print(
-            "  These series are preserved unchanged "
-            "in the index."
-        )
+
+        to_delete = _prompt_vanished_deletions(vanished)
+
+        if to_delete:
+            removed = remove_series_from_index(to_delete)
+            print(
+                f"  \u2713 Removed {removed} series "
+                "from index."
+            )
+        else:
+            print(
+                "  \u2713 No series removed — all "
+                "vanished entries preserved."
+            )
+
         logger.info(
             "Vanished series notification: %d series "
-            "not found in scrape scope '%s'",
-            len(vanished), scrape_scope,
+            "not found in scrape scope '%s', "
+            "%d deleted by user",
+            len(vanished), scrape_scope, len(to_delete),
         )
 
-    return vanished
+        kept = [
+            title for title, _ in vanished
+            if title not in set(to_delete)
+        ]
+        return kept
+
+    return []
 
 
 def detect_changes(  # pylint: disable=too-many-branches
