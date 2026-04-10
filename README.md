@@ -114,6 +114,10 @@ After report generation, you can export ongoing series URLs back to `series_urls
     └── bs_to_backup.log        # Rotating log file
 ```
 
+## Author
+
+Nawid Salehie
+
 ## License
 
 Private project — not licensed for redistribution.
