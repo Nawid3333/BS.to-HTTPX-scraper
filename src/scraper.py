@@ -1202,12 +1202,7 @@ class BsToScraper:  # pylint: disable=too-many-instance-attributes
         if len(new_list) <= 50:
             for s in new_list:
                 print(f"  + {s['title']}")
-        n = (
-            NUM_WORKERS if self._use_parallel else 1
-        )
-        await self._scrape_list(
-            new_list, num_workers=n,
-        )
+        await self._scrape_list(new_list, num_workers=1)
 
     async def _run_all(self, tmp):
         """Scrape all series (default mode)."""
