@@ -183,13 +183,41 @@ def _probe_hosts(scraper, site_urls):
         return []
 
 
-def _fetch_catalogue_info_for_host(scraper, site_url):
-    """Fetch count and slug set in one login/catalogue pass; return (count, slugs)."""
+def _fetch_catalogue_info_for_hosts(scraper, site_urls):
+    """Fetch every host's catalogue at once; return {site_url: (count, slugs)}.
+
+    The hosts are independent servers, so fetching them one after another was
+    time spent for no reason: three sequential multi-megabyte catalogue
+    downloads were most of the wait between launch and the menu.
+
+    Each host gets its own scraper instance. get_catalogue_info_for_site sets
+    self.site_url for the duration of the call, so sharing one scraper across
+    concurrent hosts would let them overwrite each other's target -- and a
+    count cross-checked against a different host's slug set is exactly the
+    kind of wrong-but-plausible result that goes unnoticed. The instances do
+    no I/O in __init__, so an extra one per host costs nothing.
+
+    A host that fails still yields (None, set()) and does not affect the
+    others, which is what the one-host-at-a-time version did.
+    """
+
+    async def one(site_url):
+        try:
+            return await type(scraper)().get_catalogue_info_for_site(site_url)
+        except Exception as exc:
+            logger.warning("Could not fetch catalogue info for %s: %s", site_url, exc)
+            return None, set()
+
+    async def gather_all():
+        return await asyncio.gather(*(one(url) for url in site_urls))
+
+    if not site_urls:
+        return {}
     try:
-        return asyncio.run(scraper.get_catalogue_info_for_site(site_url))
+        return dict(zip(site_urls, asyncio.run(gather_all()), strict=True))
     except Exception as exc:
-        logger.warning("Could not fetch catalogue info for %s: %s", site_url, exc)
-        return None, set()
+        logger.warning("Could not fetch catalogue info: %s", exc)
+        return {}
 
 
 def _collect_index_slugs(idx_mgr):
@@ -358,7 +386,12 @@ def _probe_sites_before_scrape(scraper, idx_mgr=None):
     print("\n→ Checking host availability...\n")
     results = _probe_hosts(scraper, site_urls)
 
-    ok_hosts = []
+    ok_hosts = [entry["site_url"] for entry in results if entry.get("ok")]
+    # Every reachable host's catalogue in one concurrent round. Unreachable
+    # hosts are left out, so a dead mirror still costs only its probe rather
+    # than a second full timeout.
+    catalogue = _fetch_catalogue_info_for_hosts(scraper, ok_hosts)
+
     host_counts = {}
     table_rows = []
     host_reports = []
@@ -372,8 +405,7 @@ def _probe_sites_before_scrape(scraper, idx_mgr=None):
         compare_txt = None
 
         if ok:
-            ok_hosts.append(site_url)
-            count, site_slugs = _fetch_catalogue_info_for_host(scraper, site_url)
+            count, site_slugs = catalogue.get(site_url, (None, set()))
             host_counts[site_url] = count
             if count is not None:
                 idx_count, compare_txt, report_entry = _cross_check_index(
