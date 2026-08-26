@@ -433,6 +433,31 @@ def _series_list_url(site_url: str | None = None) -> str:
 REQUEST_TIMEOUT = HTTP_REQUEST_TIMEOUT
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:128.0) Gecko/20100101 Firefox/128.0"
 
+
+# A login page has a password field; a stale mirror serving a placeholder does
+# not. Matched on the raw markup rather than through a parser: this runs on
+# every host at startup and only has to answer "is this the login page", not
+# read anything out of it.
+_PASSWORD_INPUT_RE = re.compile(r"<input[^>]+type\s*=\s*['\"]?password", re.IGNORECASE)
+
+
+def _looks_like_login_page(html: str) -> bool:
+    """True when a probe response really is this site's login page.
+
+    The probe used to ask only whether the word "login" appeared. That is a
+    single English string deciding which mirrors are usable, so a reworded or
+    translated page would have taken every host down at once.
+
+    The password field is the signal that carries the meaning and does not
+    depend on wording. The text tests stay on as alternatives, which makes
+    this strictly more accepting than the old check -- nothing that passes
+    today can start failing because of this.
+    """
+    if _PASSWORD_INPUT_RE.search(html):
+        return True
+    lowered = html.lower()
+    return "login" in lowered or "anmelden" in lowered
+
 _SERIE_PATH_RE = re.compile(r"(/serie/[^/]+)")
 _UTILITY_PAGES = {
     "alle serien",
@@ -2294,7 +2319,7 @@ class BsToScraper:  # pylint: disable=too-many-instance-attributes
             ),
             )
             resp = await client.get(_login_url(site_url))
-            ok = resp.status_code < 500 and "login" in resp.text.lower()
+            ok = resp.status_code < 500 and _looks_like_login_page(resp.text)
             return {
                 "site_url": site_url,
                 "ok": ok,
