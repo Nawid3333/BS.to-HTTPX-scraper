@@ -1323,8 +1323,16 @@ class BsToScraper:  # pylint: disable=too-many-instance-attributes
     async def _login_client(
         self,
         client: httpx.AsyncClient,
+        verify: bool = True,
     ) -> None:
-        """Log in an existing httpx client to bs.to."""
+        """Log in an existing httpx client to bs.to.
+
+        verify: fetch a known-good page afterwards and confirm the session
+            really is logged in. Callers that immediately fetch the catalogue
+            pass False: _get_all_series applies the same _is_logged_in check
+            to the same response, so verifying here only downloads the page a
+            second time to reach the same verdict.
+        """
         site_url = self.site_url
         login_url = _login_url(site_url)
         resp = await client.get(login_url)
@@ -1348,6 +1356,8 @@ class BsToScraper:  # pylint: disable=too-many-instance-attributes
         )
 
         # Verify on a non-login page instead of trusting the login response.
+        if not verify:
+            return
         series_list_url = _series_list_url(site_url)
         verify_resp = await client.get(series_list_url)
         verify_soup = make_soup(verify_resp.text)
@@ -1357,6 +1367,7 @@ class BsToScraper:  # pylint: disable=too-many-instance-attributes
 
     async def _create_logged_in_client(
         self,
+        verify: bool = True,
     ) -> httpx.AsyncClient:
         """Create an httpx client and log in to bs.to."""
         client = httpx.AsyncClient(
@@ -1377,7 +1388,7 @@ class BsToScraper:  # pylint: disable=too-many-instance-attributes
                 max_keepalive_connections=self.pool_workers * SEASON_CONCURRENCY + 4,
             ),
         )
-        await self._login_client(client)
+        await self._login_client(client, verify=verify)
         return client
 
     async def _get_all_series(
@@ -2321,7 +2332,10 @@ class BsToScraper:  # pylint: disable=too-many-instance-attributes
         previous_site_url = self.site_url
         try:
             self.site_url = site_url
-            client = await self._create_logged_in_client()
+            # _get_all_series fetches the catalogue and applies the same
+            # logged-in check the login's verify step would, so verifying
+            # here only downloaded the same large page a second time.
+            client = await self._create_logged_in_client(verify=False)
             try:
                 series = await self._get_all_series(client)
             finally:
