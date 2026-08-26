@@ -76,7 +76,7 @@ All optional, with sensible defaults. Set them in `config/.env`.
 
 | Variable | Default | What it does |
 | --- | --- | --- |
-| `BS_MAX_WORKERS` | `4` | Concurrent scraping sessions. The default was measured on a representative sample of this catalogue, not guessed — higher is not faster, and past the peak it only adds load. |
+| `BS_MAX_WORKERS` | `12` | Concurrent scraping sessions. Measured, not guessed: throughput climbs steeply to 8, flattens by 12, and is indistinguishable from 12 up to 32 — past 12 only adds load. |
 | `BS_SEASON_CONCURRENCY` | `4` | Season pages fetched at once per series. Total requests in flight is workers x this. |
 | `BS_CHECKPOINT_EVERY` | `50` | Save resume state every N series. |
 | `BS_PROFILE` | unset | Set to `1` to print where a run's time actually went (network vs parse vs disk). |
@@ -95,10 +95,9 @@ python main.py
 | 2   | **Scrape only NEW series**          | Scrapes only series not yet in the index (faster).                         |
 | 3   | **Scrape unwatched series**         | Skips fully watched series; focuses on ongoing/partial.                    |
 | 4   | **Generate full report**            | Statistics report saved to JSON with ongoing series export.                |
-| 5   | **Batch add series from text file** | Import multiple series from a text file.                                   |
+| 5   | **Single link / batch add**         | Add one series by pasting its bs.to URL, or batch-import from a text file. |
 | 6   | **Retry failed series**             | Bulk retry all series that failed in previous runs.                        |
-| 7   | **Add single series by URL**        | Add one series by pasting its bs.to URL.                                   |
-| 8   | **Exit**                            | Clean exit.                                                                |
+| 0   | **Exit**                            | Clean exit.                                                                |
 
 > **Pausing scraping:** there is no dedicated menu option. To gracefully pause workers, create a `.pause_scraping` file in the `data/` directory (see [Pause/resume](#pauseresume) below).
 

@@ -79,7 +79,6 @@ _MODE_LABELS = {
     "all_series": "Scrape all series",
     "new_only": "Scrape new series only",
     "unwatched": "Scrape unwatched series",
-    "single": "Add single series by URL",
     "batch": "Batch add from file",
     "retry": "Retry failed series",
     "subscribed": "Subscribed series",
@@ -501,9 +500,8 @@ def show_menu():
     print("  2. Scrape only NEW series")
     print("  3. Scrape unwatched series")
     print("  4. Generate full report")
-    print("  5. Batch add series from text file")
+    print("  5. Single link / batch add")
     print("  6. Retry failed series from last run")
-    print("  7. Add single series by URL")
     print("  0. Exit\n")
 
 
@@ -817,31 +815,53 @@ def scrape_unwatched():
     )
 
 
-def add_series_by_url():
-    """Prompt for a single bs.to series URL and scrape it."""
+def single_or_batch_add():
+    """Add single series by URL or batch from file with auto-detect"""
+    default_file = DEFAULT_BATCH_FILE
+    print("\n\u2192 Add single link / batch from file")
+    print("  \u2022 Paste URL \u2192 scrapes single series")
+    print("  \u2022 Enter filename \u2192 uses that file for batch")
+    print(f"  \u2022 Press Enter \u2192 uses default ({default_file})")
+    print("  \u2022 Type 0   \u2192 back to main menu\n")
+
+    user_input = input(f"Enter [default: {default_file}]: ").strip()
+
+    if user_input == "0":
+        return
+    if not user_input:
+        user_input = default_file
+
+    if user_input.startswith(("http://", "https://")):
+        _add_single_series_by_url(user_input)
+    else:
+        _batch_add_from_file(user_input)
+
+
+def _add_single_series_by_url(url):
+    """Validate a single bs.to series URL and scrape it, retrying on bad input."""
     example_host = (ACTIVE_SITE_URL or SITE_URLS[0]).rstrip("/")
-    print("\n\u2192 Add single series by URL")
-    print(f"  Example: {example_host}/serie/Breaking-Bad")
-    print("  0. Back\n")
 
     while True:
-        url = input("Enter series URL: ").strip()
         if not url or url == "0":
             return
         if not url.startswith(("http://", "https://")):
             print("\u2717 Invalid URL (must start with http:// or https://)")
+            url = input("Enter series URL (or 0 to cancel): ").strip()
             continue
         try:
             parsed_url = urlparse(url)
             if not parsed_url.netloc or parsed_url.netloc not in VALID_SERIES_HOSTS:
                 print("\u2717 Invalid series host URL")
+                url = input("Enter series URL (or 0 to cancel): ").strip()
                 continue
             if not _SERIE_URL_RE.search(parsed_url.path):
                 print(f"\u2717 URL must be a valid series page (e.g. {example_host}/serie/Breaking-Bad)")
+                url = input("Enter series URL (or 0 to cancel): ").strip()
                 continue
         except ValueError:
             print("\u2717 Invalid URL format")
             logger.error("Invalid URL format: %s", url)
+            url = input("Enter series URL (or 0 to cancel): ").strip()
             continue
         break
 
@@ -977,10 +997,10 @@ def generate_report():  # pylint: disable=too-many-locals,too-many-branches
             if ongoing_count > 10:
                 print(f"    ... and {ongoing_count - 10} more")
 
-            prompt = f"\nExport {ongoing_count} ongoing series URLs to series_urls.txt? (y/n): "
-            export = input(prompt).strip().lower()
-            if export == "y":
-                _export_ongoing_urls(manager, ongoing_titles, active_site_url=ACTIVE_SITE_URL)
+            # Exported automatically: appending is additive and de-duplicated,
+            # so there is nothing to lose by doing it, and the old prompt only
+            # stood between the report and an up-to-date batch file.
+            _export_ongoing_urls(manager, ongoing_titles, active_site_url=ACTIVE_SITE_URL)
 
         print("\n  SAVED TO")
         print(f"    {report_file}")
@@ -989,6 +1009,61 @@ def generate_report():  # pylint: disable=too-many-locals,too-many-branches
     except Exception as exc:  # pylint: disable=broad-exception-caught
         print(f"\n\u2717 Failed to generate report: {exc}")
         logger.error("Failed to generate report: %s", exc)
+
+
+def _report_batch_export(added, skipped, urls_file, noun):
+    """Print what the automatic batch-file export actually did.
+
+    The export runs without asking now, so the terminal has to say plainly
+    what changed -- which URLs were added, and how many were already there.
+    """
+    if added:
+        print(f"\n✓ Added {len(added)} {noun} URL(s) to {urls_file}:")
+        for url in added[:10]:
+            print(f"    + {url}")
+        if len(added) > 10:
+            print(f"    ... and {len(added) - 10} more")
+    else:
+        print(f"\n✓ {urls_file} already lists every ongoing {noun} — nothing added")
+    if skipped:
+        print(f"  ({skipped} already listed)")
+    print(f"  → Use option 5 (Single link / batch add) to rescrape these {noun}")
+    print("  (existing entries are kept — delete the file first for a clean replace)")
+
+
+def _append_urls_to_batch_file(urls_file, urls):
+    """Add URLs to the batch file without discarding what is already there.
+
+    Exporting used to open the file in "w" mode, which replaced the whole
+    file -- a hand-curated list, comments and all, vanished the moment
+    someone answered yes to the export prompt. Appending keeps that work.
+
+    A URL already present is skipped, including one that is commented out:
+    commenting a line was a deliberate decision to skip that series, and an
+    export should not quietly undo it. To start clean, delete the file and
+    export again.
+
+    Returns (added_urls, skipped_count).
+    """
+    existing_lines = []
+    known = set()
+    if os.path.exists(urls_file):
+        with open(urls_file, encoding="utf-8") as fh:
+            existing_lines = fh.read().splitlines()
+        for line in existing_lines:
+            stripped = line.strip().lstrip("#").strip()
+            if stripped:
+                known.add(stripped)
+
+    fresh = [u for u in urls if u not in known]
+    if fresh:
+        body = list(existing_lines)
+        while body and not body[-1].strip():
+            body.pop()
+        body.extend(fresh)
+        with open(urls_file, "w", encoding="utf-8") as fh:
+            fh.write("\n".join(body) + "\n")
+    return fresh, len(urls) - len(fresh)
 
 
 def _export_ongoing_urls(manager, ongoing_titles, active_site_url=None):
@@ -1005,14 +1080,13 @@ def _export_ongoing_urls(manager, ongoing_titles, active_site_url=None):
                 urls.append(url)
         if urls:
             urls_file = DEFAULT_BATCH_FILE
-            with open(urls_file, "w", encoding="utf-8") as f:
-                f.write("\n".join(urls) + "\n")
-            print(f"\n\u2713 Exported {len(urls)} URLs to {urls_file}")
-            print("  \u2192 Use option 5 (Batch add) to rescrape these series")
+            added, skipped = _append_urls_to_batch_file(urls_file, urls)
+            _report_batch_export(added, skipped, urls_file, "series")
             logger.info(
-                "Exported %d URLs to %s",
-                len(urls),
+                "Appended %d URLs to %s (%d already present)",
+                len(added),
                 urls_file,
+                skipped,
             )
         else:
             print("\n\u26a0 Could not extract URLs from ongoing series")
@@ -1022,21 +1096,8 @@ def _export_ongoing_urls(manager, ongoing_titles, active_site_url=None):
         logger.error("Failed to export URLs: %s", exc)
 
 
-def batch_add_series_from_file():
+def _batch_add_from_file(file_path):
     """Read series URLs from a text file and scrape them."""
-    print("\n\u2192 Batch add series from text file")
-    print("  The file should contain one URL per line")
-    print("  Example format:")
-    print("    https://bs.to/serie/Breaking-Bad")
-    print("  (type 0 to go back)")
-
-    default_file = DEFAULT_BATCH_FILE
-    file_path = input(f"Enter file path [default: {default_file}]: ").strip().strip("\"'")
-    if file_path == "0":
-        return
-    if not file_path:
-        file_path = default_file
-
     if not os.path.exists(file_path):
         print(f"\u2717 File not found: {file_path}")
         return
@@ -1158,12 +1219,12 @@ def main():
 
     while True:
         show_menu()
-        choice = input("Enter your choice (0-7): ").strip()
-        if not choice.isdigit() or not 0 <= int(choice) <= 7:
-            print("\u2717 Invalid choice. Please enter a number between 0 and 7.")
+        choice = input("Enter your choice (0-6): ").strip()
+        if not choice.isdigit() or not 0 <= int(choice) <= 6:
+            print("\u2717 Invalid choice. Please enter a number between 0 and 6.")
             continue
 
-        if choice in ["1", "2", "3", "5", "6", "7"] and not check_disk_space():
+        if choice in ["1", "2", "3", "5", "6"] and not check_disk_space():
             print("\u26a0 Aborting due to low disk space.")
             continue
 
@@ -1176,11 +1237,9 @@ def main():
         elif choice == "4":
             generate_report()
         elif choice == "5":
-            batch_add_series_from_file()
+            single_or_batch_add()
         elif choice == "6":
             retry_failed_series()
-        elif choice == "7":
-            add_series_by_url()
         elif choice == "0":
             print("\n\u2713 Goodbye!\n")
             break

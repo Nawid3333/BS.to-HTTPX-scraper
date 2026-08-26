@@ -107,15 +107,27 @@ DEFAULT_BATCH_FILE_PATH = os.path.join(os.path.dirname(__file__), "..", "series_
 DEFAULT_BATCH_FILE = os.path.abspath(DEFAULT_BATCH_FILE_PATH)
 
 # ==================== SCRAPING SETTINGS ====================
-# Measured, not guessed: a worker sweep over a representative sample of
-# this catalogue (median 1 season, matching the real distribution) found
-# 30.4 pages/s at 4, vs 25.7 at 6 and 26.1 at 12; 4 is also the most
-# stable setting -- 6 and 12 swung by 8-16 pages/s between repeats.
-# Re-measured after workers began sharing one logged-in session: the old
-# per-worker login both skewed the comparison and cost real throughput.
+# Measured, not guessed. Two sweeps on one shared login, series shuffled
+# per pass and worker counts run in random order:
+#
+#   250 series x2   4: 11.78   6: 15.78   8: 17.69  12: 18.18  16: 19.32
+#   300 series x3                        12: 17.14  16: 16.70  20: 16.30
+#                                        24: 16.55  32: 16.61
+#
+# Throughput climbs steeply to 8, flattens by 12, and is indistinguishable
+# from 12 to 32 -- the two sweeps disagree on whether 16 beats 12, which is
+# itself the answer: past 12 the differences are session noise, not signal.
+# 12 was fastest in the longer sweep and the steadiest there (spread 0.33
+# vs 3.12 at 24), so it is the last setting that buys anything real.
+#
+# The earlier note here recommended 4 on stability grounds from a sweep
+# that stopped at 12; the wider sweep shows 4 costs ~35% throughput for
+# no benefit. Zero 429/503 was seen anywhere up to 32 workers, so this
+# plateau is local saturation, not the site pushing back -- raising it
+# further only adds load.
 # Past the peak the season fan-out already keeps pool_workers *
 # SEASON_CONCURRENCY requests in flight, so more workers only add load.
-NUM_WORKERS = int(os.getenv("BS_MAX_WORKERS", "4"))
+NUM_WORKERS = int(os.getenv("BS_MAX_WORKERS", "12"))
 
 # Season pages of one series are independent GETs. Fetching them one after
 # another made a series' scrape time scale linearly with its season count,

@@ -5,6 +5,7 @@ and reporting for the local JSON-based series database.
 """
 
 import asyncio
+import copy
 import difflib
 import json
 import logging
@@ -593,6 +594,16 @@ def _prompt_vanished_deletions(vanished_entries):
         if choice == "y":
             to_delete.append(title)
         elif choice == "a":
+            # "all" is the one irreversible keystroke in this loop: it deletes
+            # every remaining entry without showing them. A bad catalogue fetch
+            # can put thousands of perfectly good series on this list, so the
+            # count has to be stated and confirmed before it runs.
+            remaining = len(vanished_entries) - i + 1
+            print(f"\n  [WARN] This deletes {remaining} series from the index, including this one.")
+            print("  Deleted entries lose their stored watch history.")
+            if input(f"  Type 'DELETE {remaining}' to confirm: ").strip() != f"DELETE {remaining}":
+                print("  -> Not confirmed; nothing deleted for this entry.")
+                continue
             to_delete.append(title)
             delete_all = True
         elif choice == "s":
@@ -789,6 +800,7 @@ def detect_changes(  # pylint: disable=too-many-branches
     for title in new_titles - old_titles:
         if title:
             changes["new_series"].append(title)
+            _flag_new_series_watched_episodes(title, new_data.get(title, {}), changes)
 
     # Episode changes for existing series
     for title in old_titles & new_titles:
@@ -800,6 +812,28 @@ def detect_changes(  # pylint: disable=too-many-branches
         )
 
     return changes
+
+
+def _flag_new_series_watched_episodes(title, new_series, changes):
+    """Report the watched episodes a brand-new series arrives with.
+
+    A series the index has never seen is expected to be unwatched. When the
+    site already reports otherwise, those episodes are surfaced in the same
+    category an existing series would use, so they reach the watched prompt
+    instead of being adopted silently under [NEW SERIES].
+    """
+    if not new_series or not isinstance(new_series, dict):
+        return
+    for season in new_series.get("seasons", []):
+        if not season or not isinstance(season, dict):
+            continue
+        s_label = season.get("season", "")
+        for ep in season.get("episodes", []):
+            if not ep or not isinstance(ep, dict):
+                continue
+            ep_num = ep.get("number")
+            if ep_num is not None and ep.get("watched", False):
+                changes["newly_watched"].append((title, s_label, ep_num))
 
 
 def _detect_episode_changes(  # pylint: disable=too-many-branches
@@ -851,6 +885,14 @@ def _detect_episode_changes(  # pylint: disable=too-many-branches
                     changes["new_episodes"].append(
                         (title, s_label, ep_num),
                     )
+                    if new_watched:
+                        # No prior state existed to diff against, but the site
+                        # already reports this brand-new episode as watched.
+                        # Surface it as a watch change too, so it reaches the
+                        # watched prompt instead of being adopted silently.
+                        changes["newly_watched"].append(
+                            (title, s_label, ep_num),
+                        )
                 elif old_eps[ep_key] != new_watched:
                     if not old_eps[ep_key] and new_watched:
                         changes["newly_watched"].append(
@@ -1005,10 +1047,53 @@ def _read_index_json():
         return None
 
 
+def _try_restore_backup_data():
+    """Return index data from the newest readable backup, or None.
+
+    A save that failed midway can leave the index missing or truncated while
+    the previous copy sits in .bak1. Loading an empty index instead makes
+    every series look brand new, so the backups are consulted first.
+    """
+    backup_dir = os.path.dirname(SERIES_INDEX_FILE)
+    filename = os.path.basename(SERIES_INDEX_FILE)
+    for i in range(1, 4):
+        backup_path = os.path.join(backup_dir, f"{filename}.bak{i}")
+        if not os.path.exists(backup_path):
+            continue
+        try:
+            with open(backup_path, encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, (list, dict)):
+                return data
+        except (json.JSONDecodeError, OSError) as exc:
+            logger.warning("Backup %s also unreadable: %s", backup_path, exc)
+    return None
+
+
 def _load_existing_index():
     """Load current series index from disk (list or empty)."""
     data = _read_index_json()
     return data if data is not None else []
+
+
+def _cascade_declined_new_content(changes, allowed):
+    """Drop state changes that belong to new content the user just declined.
+
+    The existence gates run first. Once a new series or a new episode is
+    refused, there is nothing left to decide about its watch or
+    subscription state, so it must not appear in the prompts that follow.
+    """
+    if not allowed.get("new_series", True):
+        refused = set(changes.get("new_series") or [])
+        if refused:
+            changes["newly_watched"] = [x for x in changes["newly_watched"] if x[0] not in refused]
+            for key in ("newly_subscribed", "watchlist_added"):
+                if key in changes:
+                    changes[key] = [t for t in changes[key] if t not in refused]
+    if not allowed.get("new_episodes", True):
+        refused_eps = {tuple(x) for x in (changes.get("new_episodes") or [])}
+        if refused_eps:
+            changes["newly_watched"] = [x for x in changes["newly_watched"] if tuple(x) not in refused_eps]
 
 
 def _prompt_watch_status_changes(  # pylint: disable=too-many-branches
@@ -1024,11 +1109,75 @@ def _prompt_watch_status_changes(  # pylint: disable=too-many-branches
     one more run.
     """
     allowed = {
+        # Existence gates: they decide what enters the index at all, and are
+        # asked before the state gates below. Declining one cascades -- there
+        # is nothing left to ask about content that is not being added.
+        # Readers default an ABSENT flag to True: only an explicit refusal
+        # keeps content out, so a caller that predates these gates still
+        # stores everything, exactly as it did before.
+        "new_series": False,
+        "new_episodes": False,
         "watched": False,
         "unwatched": False,
         "episode_remove": False,
         "season_remove": False,
     }
+
+    def _show_and_confirm(header, items, formatter, prompt_text, note="(manual confirmation required)"):
+        print(f"\n{header}")
+        print(f"   {note}")
+        print("\n" + "-" * 70)
+        for item in items:
+            print(formatter(item))
+        print("-" * 70)
+        resp = input(f"\n{prompt_text} (y/n): ").strip().lower()
+        return resp == "y"
+
+    if changes["new_series"]:
+        count = len(changes["new_series"])
+        logger.info("Prompting user to confirm adding %d new series.", count)
+
+        def _fmt_new_series(title):
+            series = new_dict.get(title) or {}
+            total_ep, watched_ep = get_episode_counts(series)
+            return f"  [+] {title}: {watched_ep}/{total_ep} watched"
+
+        if _show_and_confirm(
+            f"[NEW SERIES] {count} series not yet in the index",
+            changes["new_series"],
+            _fmt_new_series,
+            "Add these new series to the index?",
+        ):
+            allowed["new_series"] = True
+            logger.info("User allowed new series.")
+        else:
+            print("  -> New series will NOT be added (offered again next scrape)")
+            logger.info("User denied new series.")
+
+    if changes["new_episodes"]:
+        count = len(changes["new_episodes"])
+        logger.info("Prompting user to confirm adding %d new episodes.", count)
+        grouped_new = defaultdict(list)
+        for title, season, ep_num in changes["new_episodes"]:
+            grouped_new[(title, season)].append(str(ep_num))
+        new_ep_lines = [
+            f"  [+] {title} [{season}]: episode(s) {', '.join(nums)}"
+            for (title, season), nums in sorted(grouped_new.items())
+        ]
+        if _show_and_confirm(
+            f"[NEW EPISODES] {count} episode(s) not yet in the index",
+            new_ep_lines,
+            lambda x: x,
+            "Add these new episodes to the index?",
+        ):
+            allowed["new_episodes"] = True
+            logger.info("User allowed new episodes.")
+        else:
+            print("  -> New episodes will NOT be added (offered again next scrape)")
+            logger.info("User denied new episodes.")
+
+    # Anything refused above drops out of the state prompts below.
+    _cascade_declined_new_content(changes, allowed)
 
     if changes["newly_watched"]:
         count = len(changes["newly_watched"])
@@ -1036,22 +1185,25 @@ def _prompt_watch_status_changes(  # pylint: disable=too-many-branches
             "Prompting user to confirm marking %d episodes as watched.",
             count,
         )
-        print(f"\n[OK] {count} episode(s) would change from UNWATCHED to WATCHED")
-        print("   (manual confirmation required for all watched changes)")
-        print("\n" + "-" * 70)
         grouped = defaultdict(list)
         for x in changes["newly_watched"]:
             grouped[(x[0], x[1])].append(x[2])
-        for (title, season), ep_nums in grouped.items():
+
+        def _fmt_watched(pair):
+            (title, season), ep_nums = pair
             series = new_dict.get(title)
             total_in_season, watched_in_season = _get_season_stats(series, season)
             if total_in_season > 0:
-                print(f"  [+] {title} [{season}]: {watched_in_season}/{total_in_season} episodes")
-            else:
-                print(f"  [+] {title} [{season}]: {len(ep_nums)} episode(s)")
-        print("-" * 70)
-        answer = input("\nAllow these episodes to be marked as WATCHED? (y/n): ").strip().lower()
-        if answer == "y":
+                return f"  [+] {title} [{season}]: {watched_in_season}/{total_in_season} episodes"
+            return f"  [+] {title} [{season}]: {len(ep_nums)} episode(s)"
+
+        if _show_and_confirm(
+            f"[OK] {count} episode(s) would change from UNWATCHED to WATCHED",
+            list(grouped.items()),
+            _fmt_watched,
+            "Allow these episodes to be marked as WATCHED?",
+            note="(manual confirmation required for all watched changes)",
+        ):
             allowed["watched"] = True
             logger.info("User allowed watched changes.")
         else:
@@ -1064,22 +1216,25 @@ def _prompt_watch_status_changes(  # pylint: disable=too-many-branches
             "Prompting user to confirm marking %d episodes as unwatched.",
             count,
         )
-        print(f"\n[WARN] {count} episode(s) would change from WATCHED to UNWATCHED")
-        print("   (manual confirmation required for all unwatched changes)")
-        print("\n" + "-" * 70)
         grouped = defaultdict(list)
         for x in changes["newly_unwatched"]:
             grouped[(x[0], x[1])].append(x[2])
-        for (title, season), ep_nums in grouped.items():
+
+        def _fmt_unwatched(pair):
+            (title, season), ep_nums = pair
             series = new_dict.get(title)
             total_in_season, watched_in_season = _get_season_stats(series, season)
             if total_in_season > 0:
-                print(f"  [!] {title} [{season}]: {watched_in_season}/{total_in_season} episodes")
-            else:
-                print(f"  [!] {title} [{season}]: {len(ep_nums)} episode(s)")
-        print("-" * 70)
-        answer = input("\nAllow these episodes to be marked as UNWATCHED? (y/n): ").strip().lower()
-        if answer == "y":
+                return f"  [!] {title} [{season}]: {watched_in_season}/{total_in_season} episodes"
+            return f"  [!] {title} [{season}]: {len(ep_nums)} episode(s)"
+
+        if _show_and_confirm(
+            f"[WARN] {count} episode(s) would change from WATCHED to UNWATCHED",
+            list(grouped.items()),
+            _fmt_unwatched,
+            "Allow these episodes to be marked as UNWATCHED?",
+            note="(manual confirmation required for all unwatched changes)",
+        ):
             allowed["unwatched"] = True
             logger.info("User allowed unwatched changes.")
         else:
@@ -1090,14 +1245,16 @@ def _prompt_watch_status_changes(  # pylint: disable=too-many-branches
         grouped_removed = defaultdict(list)
         for title, season, ep_num in changes["removed_episodes"]:
             grouped_removed[(title, season)].append(str(ep_num))
-        print(f"\n[WARN] {len(changes['removed_episodes'])} episode(s) are in the index but NOT in this scrape")
-        print("   (manual confirmation required)")
-        print("\n" + "-" * 70)
-        for (title, season), nums in sorted(grouped_removed.items()):
-            print(f"  [-] {title} [{season}]: episode(s) {', '.join(nums)}")
-        print("-" * 70)
-        answer = input("\nDELETE these episodes from the index? (y/n): ").strip().lower()
-        if answer == "y":
+        removed_ep_lines = [
+            f"  [-] {title} [{season}]: episode(s) {', '.join(nums)}"
+            for (title, season), nums in sorted(grouped_removed.items())
+        ]
+        if _show_and_confirm(
+            f"[WARN] {len(changes['removed_episodes'])} episode(s) are in the index but NOT in this scrape",
+            removed_ep_lines,
+            lambda x: x,
+            "DELETE these episodes from the index?",
+        ):
             allowed["episode_remove"] = True
             logger.info("User allowed episode removals.")
         else:
@@ -1105,14 +1262,15 @@ def _prompt_watch_status_changes(  # pylint: disable=too-many-branches
             logger.info("User denied episode removals.")
 
     if changes.get("removed_seasons"):
-        print(f"\n[WARN] {len(changes['removed_seasons'])} season(s) are in the index but NOT in this scrape")
-        print("   (manual confirmation required)")
-        print("\n" + "-" * 70)
-        for title, season in sorted(changes["removed_seasons"]):
-            print(f"  [-] {title}: season {season}")
-        print("-" * 70)
-        answer = input("\nDELETE these whole seasons from the index? (y/n): ").strip().lower()
-        if answer == "y":
+        removed_season_lines = [
+            f"  [-] {title}: season {season}" for title, season in sorted(changes["removed_seasons"])
+        ]
+        if _show_and_confirm(
+            f"[WARN] {len(changes['removed_seasons'])} season(s) are in the index but NOT in this scrape",
+            removed_season_lines,
+            lambda x: x,
+            "DELETE these whole seasons from the index?",
+        ):
             allowed["season_remove"] = True
             logger.info("User allowed season removals.")
         else:
@@ -1133,10 +1291,38 @@ def _merge_series_data(
     flips when the corresponding flag is True.
     Returns merged dict {title: series}.
     """
+    # Both inputs are copied first. The merge resolves each episode's watch
+    # flag by writing it back into the new entry, so without this the caller's
+    # own data came back rewritten -- merging the same scrape twice gave a
+    # different answer the second time, and series_data was quietly altered.
+    old_data = copy.deepcopy(old_data)
+    new_dict = copy.deepcopy(new_dict)
     merged = {s.get("title"): s for s in old_data} if isinstance(old_data, list) else dict(old_data)
 
     for title, new_entry in new_dict.items():
         if title not in merged:
+            if not allowed.get("new_series", True):
+                # The user declined to add this series, so the index stays
+                # unaware of it and the next scrape offers it again.
+                continue
+            if not allowed.get("watched"):
+                # The series is being added, but the watch state it arrived
+                # with was not approved, so it starts from the expected
+                # default. The next scrape offers that state again.
+                for season in new_entry.get("seasons", []):
+                    if not season or not isinstance(season, dict):
+                        continue
+                    for ep in season.get("episodes", []):
+                        if ep and isinstance(ep, dict):
+                            ep["watched"] = False
+                    sync_season_counts(season)
+            # Derive the counters from the episode lists rather than trusting
+            # the fields the scrape carried in -- the lists are the
+            # authoritative record and may have just been rewritten.
+            total_eps, watched_eps = get_episode_counts(new_entry)
+            new_entry["total_episodes"] = total_eps
+            new_entry["watched_episodes"] = watched_eps
+            new_entry["unwatched_episodes"] = total_eps - watched_eps
             now = datetime.now().isoformat()
             new_entry["added_date"] = now
             new_entry["last_updated"] = now
@@ -1191,6 +1377,15 @@ def _merge_existing_series(  # pylint: disable=too-many-locals
                         new_ep["watched"] = False
                     else:
                         new_ep["watched"] = old_w
+                else:
+                    # An episode the index has never seen. It enters only if
+                    # the user approved new episodes, and it enters unwatched
+                    # unless they also approved the watched change it arrived
+                    # with.
+                    if not allowed.get("new_episodes", True):
+                        continue
+                    if new_ep.get("watched", False) and not allowed.get("watched"):
+                        new_ep["watched"] = False
                 old_eps[ep_num] = new_ep
                 seen_new.add(ep_num)
             if allowed.get("episode_remove", False):
@@ -1584,12 +1779,17 @@ def _prompt_episode_mismatches(mismatches, old_data=None, active_site_url=None):
     return True, None
 
 
-def confirm_and_save_changes(new_data, description="data", active_site_url=None):
+def confirm_and_save_changes(new_data, description="data", active_site_url=None, index_manager=None):
     """Show changes, prompt, merge, and save.
+
+    `index_manager` is the seam the sibling projects have always had: pass one
+    and this reads and writes through it instead of touching the real index on
+    disk. Without it a test or a script that only meant to inspect the prompts
+    would merge into the live index -- which is exactly what happened once.
 
     Returns (saved: bool, changes: dict | None).
     """
-    old_data = _load_existing_index()
+    old_data = list(index_manager.series_index.values()) if index_manager is not None else _load_existing_index()
 
     if isinstance(new_data, list):
         new_dict = {s.get("title"): s for s in new_data if s.get("title") and not s.get("_error")}
@@ -1626,6 +1826,10 @@ def confirm_and_save_changes(new_data, description="data", active_site_url=None)
 
     allowed = _prompt_watch_status_changes(changes, new_dict)
 
+    if not allowed.get("new_series", True):
+        changes["new_series"] = []
+    if not allowed.get("new_episodes", True):
+        changes["new_episodes"] = []
     if not allowed["watched"]:
         changes["newly_watched"] = []
     if not allowed["unwatched"]:
@@ -1681,7 +1885,8 @@ def confirm_and_save_changes(new_data, description="data", active_site_url=None)
         return False, None
 
     try:
-        index_manager = IndexManager()
+        if index_manager is None:
+            index_manager = IndexManager()
         series_list = [_order_series_entry(series) for series in merged.values()]
         index_manager.series_index = {s.get("title"): s for s in series_list if s.get("title")}
         index_manager.save_index()
@@ -1718,7 +1923,11 @@ class IndexManager:
         self.series_index = {}
         data = _read_index_json()
         if data is None:
-            return
+            data = _try_restore_backup_data()
+            if data is None:
+                return
+            print("[INFO] Index unreadable — restored from backup.")
+            logger.warning("Index unreadable at %s; restored from backup", SERIES_INDEX_FILE)
         try:
             if isinstance(data, list):
                 self.series_index = {item.get("title"): item for item in data if item.get("title")}
