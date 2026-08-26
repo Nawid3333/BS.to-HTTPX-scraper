@@ -21,6 +21,8 @@ import time
 from urllib.parse import urljoin, urlparse
 
 import httpx
+import lxml.etree
+import lxml.html
 from bs4 import BeautifulSoup
 
 from config.config import (
@@ -55,11 +57,73 @@ except ImportError:  # pragma: no cover - depends on the install
 def make_soup(html: str) -> BeautifulSoup:
     """Parse a page with the fastest parser available.
 
-    Every parse in this module goes through here so the choice is made in
-    exactly one place -- a parser swap must never be able to apply to some
-    pages and not others.
+    Every BeautifulSoup parse in this module goes through here so the choice
+    is made in exactly one place -- a parser swap must never be able to apply
+    to some pages and not others.
+
+    Season pages are the exception and no longer come through here: they are
+    the hot path and go straight to lxml instead. Everything else (series
+    pages, the catalogue, account pages, login) still uses this.
     """
     return BeautifulSoup(html, _HTML_PARSER)
+
+
+def make_doc(html: str):
+    """Parse a page into an lxml tree, or None if the body is not markup.
+
+    The season-page parsers use this instead of make_soup: building a
+    BeautifulSoup tree was most of their cost, and the whole worker pool
+    shares one event loop, so that time overlapped with nothing.
+
+    document_fromstring, not fromstring: fromstring returns a bare fragment
+    root, so markup whose outermost element is the <table> itself would never
+    match a .//table search and the page would read as a parse failure.
+    BeautifulSoup always wraps in html/body, and this has to match it.
+
+    Returning None rather than raising keeps the old behaviour for an empty
+    or non-markup body: no episode table (a scrape failure) and no language
+    dropdown (no streams), which is exactly what an empty soup produced.
+    """
+    try:
+        return lxml.html.document_fromstring(html)
+    except (lxml.etree.ParserError, ValueError):
+        return None
+
+
+def _stripped_text(el) -> str:
+    """lxml equivalent of BeautifulSoup's get_text(strip=True).
+
+    Not the same as text_content().strip(): BeautifulSoup strips *each* text
+    node and joins them with nothing, so a title split across inline markup
+    comes out glued rather than double-spaced. Joining the raw text instead
+    would quietly rewrite every stored episode title.
+    """
+    return "".join(t.strip() for t in el.itertext())
+
+
+def _hc(name: str) -> str:
+    """XPath predicate matching one whitespace-delimited class token.
+
+    `contains(@class, 'seen')` would also match `unseen`, and
+    `contains(@class, 'option')` would match `optional`. Both are the kind of
+    near-miss that turns into wrong data rather than an error, so every class
+    test goes through this.
+    """
+    return f"contains(concat(' ', normalize-space(@class), ' '), ' {name} ')"
+
+
+# The CSS these replace used descendant combinators, and BeautifulSoup's
+# find_all/find are recursive too -- hence .// throughout, never a child axis.
+_XP_ROWS_PRIMARY = f".//*[{_hc('episode-table')}]//tbody//tr[{_hc('episode-row')}]"
+_XP_ROWS_ANY_TR = f".//tr[{_hc('episode-row')}]"
+_XP_ROWS_ANY_EL = f".//*[{_hc('episode-row')}]"
+_XP_TABLE_EPISODES = f".//table[{_hc('episodes')}]"
+_XP_ANY_EPISODE_TABLE = f".//*[{_hc('episode-table')}] | .//table[{_hc('episodes')}]"
+_XP_NUMBER_CELL = f".//th[{_hc('episode-number-cell')}]"
+_XP_TITLE_GER = f".//*[{_hc('episode-title-ger')}]"
+_XP_TITLE_ENG = f".//*[{_hc('episode-title-eng')}]"
+_XP_LANGUAGE_DROPDOWN = f".//*[{_hc('series-language')}]"
+_XP_LANGUAGE_OPTIONS = f".//li[{_hc('option')}]"
 
 
 # ── Transient-failure handling ──────────────────────────────────────────────
@@ -118,31 +182,30 @@ class RateGuard:
             self._penalty = max(0.0, self._penalty * 0.5)
 
 
-# NOT restricted with a SoupStrainer, deliberately. Straining season pages to
-# the <table> subtree parses 1.2-1.6x faster and was byte-identical on every
-# captured fixture -- but _parse_episodes accepts `.episode-table` on *any*
-# element and carries generic fallbacks precisely so a site redesign does not
-# break it. A strainer keyed on tag names throws that resilience away: the
-# existing empty-season test uses <div class="episode-table">, guarding four
-# real series (alaska-eisige-tradition s2, die-schluempfe s0,
-# helden-der-baustelle s3, marry-my-husband s0), and it fails under the
-# strainer. A few percent of parse time is not worth narrowing what the
-# scraper can still read correctly.
-
-
 def parse_season_html(html: str):
     """Parse one season page and return plain data, never a soup object.
 
-    Deliberately called inline, not through asyncio.to_thread. Offloading it
-    was tried and measured 2-2.7x SLOWER on the captured fixture pages
-    (53 -> 25/22/20 pages/s at 4/8/16 concurrent), and slower still with more
-    workers. lxml releases the GIL for the raw parse, but BeautifulSoup then
-    builds its own object tree in pure Python and holds the GIL for most of
-    the work, so threads buy contention and dispatch overhead and no
-    parallelism. Keep this on the event loop unless a profile says otherwise.
+    Goes straight to lxml rather than through BeautifulSoup, and parses the
+    page once for both extractors. The tree build was most of the cost here,
+    and the whole worker pool shares one event loop, so that time overlapped
+    with nothing -- it was simply the ceiling the pool kept hitting. Both
+    parsers were verified against the recorded output of the BeautifulSoup
+    versions over 557 real pages before this switched over.
+
+    Also deliberately not offloaded to asyncio.to_thread. That was tried and
+    measured 1.8-2.7x SLOWER, both on the old parser and again at today's
+    worker counts: lxml releases the GIL for the raw parse, but the dispatch
+    and contention cost more than the parallelism buys. Keep this on the
+    event loop unless a profile says otherwise.
+
+    Not narrowed to the <table> subtree either. _parse_episodes accepts
+    `.episode-table` on *any* element and carries generic fallbacks precisely
+    so a site redesign does not break it; restricting the parse to a tag name
+    throws that resilience away, and the language dropdown lives outside the
+    table anyway.
     """
-    soup = make_soup(html)
-    return _parse_episodes(soup), _extract_season_languages(soup)
+    doc = make_doc(html)
+    return _parse_episodes(doc), _extract_season_languages(doc)
 
 
 class PhaseProfiler:
@@ -429,14 +492,25 @@ def _check_error_page(soup: BeautifulSoup) -> str | None:
 # -- HTML helpers ----------------------------------------------------
 
 
-def _parse_episodes(soup: BeautifulSoup) -> list[dict] | None:
+def _parse_episodes(doc) -> list[dict] | None:
     """Parse episode rows from a season page.
+
+    Takes an lxml tree from make_doc rather than a soup: the tree build was
+    most of the cost, and parse_season_html hands the same tree to
+    _extract_season_languages, so the page is parsed once. Output is
+    unchanged: verified against the recorded output of the BeautifulSoup
+    version over 557 pages and 9,606 episodes, including the fallback
+    branches that only synthetic markup reaches.
 
     Uses multiple fallback selectors to handle site redesigns:
       1. .episode-table tbody tr.episode-row (s.to / cine.to style)
       2. tr.episode-row
       3. .episode-row
-      4. table.episodes tr (classic bs.to style)
+      4. table.episodes tr (classic bs.to style -- what the site serves today)
+
+    Note that selector 4 takes every <tr> in the table, header rows included,
+    so a row that yields no usable episode number is skipped rather than
+    failing the page. Every real bs.to season page depends on that.
 
     Returns:
         list[dict]: Parsed episodes. An empty list means the episode table
@@ -449,37 +523,37 @@ def _parse_episodes(soup: BeautifulSoup) -> list[dict] | None:
         scrape failure -- storing 0 there corrupts the index and shows up
         later as a false "this series lost all its episodes" mismatch.
     """
+    if doc is None:
+        # An empty or non-markup body is a failed fetch, not an empty season.
+        return None
+
     # Try modern selectors first
-    rows = soup.select(".episode-table tbody tr.episode-row")
-    if not rows:
-        rows = soup.select("tr.episode-row")
-    if not rows:
-        rows = soup.select(".episode-row")
+    rows = doc.xpath(_XP_ROWS_PRIMARY) or doc.xpath(_XP_ROWS_ANY_TR) or doc.xpath(_XP_ROWS_ANY_EL)
     if not rows:
         # Final fallback: classic bs.to table.episodes
-        table = soup.select_one("table.episodes")
-        if table:
-            rows = table.select("tr")
+        tables = doc.xpath(_XP_TABLE_EPISODES)
+        if tables:
+            rows = tables[0].xpath(".//tr")
 
     if not rows:
         # Tell "the table is there, it's just empty" (a real, if rare,
         # season state) apart from "this page has no episode table at all"
         # (a redesign, a truncated response, or a soft error page).
-        if soup.select_one(".episode-table, table.episodes") is None:
+        if not doc.xpath(_XP_ANY_EPISODE_TABLE):
             return None
         return []
 
     episodes = []
     for idx, row in enumerate(rows, start=1):
         # Extract episode number
-        num_cell = row.select_one("th.episode-number-cell")
-        ep_num = num_cell.get_text(strip=True) if num_cell else ""
+        num_cell = row.xpath(_XP_NUMBER_CELL)
+        ep_num = _stripped_text(num_cell[0]) if num_cell else ""
         if not ep_num:
             ep_num = row.get("data-episode-season-id", "")
         if not ep_num:
-            cols = row.find_all("td")
+            cols = row.xpath(".//td")
             if cols:
-                ep_num = cols[0].get_text(strip=True)
+                ep_num = _stripped_text(cols[0])
         if not ep_num:
             logger.warning(
                 "Could not determine episode number for row %d",
@@ -498,21 +572,21 @@ def _parse_episodes(soup: BeautifulSoup) -> list[dict] | None:
             continue
 
         # Extract titles (German and English where available)
-        ger_cell = row.select_one(".episode-title-ger")
-        eng_cell = row.select_one(".episode-title-eng")
-        title_ger = ger_cell.get_text(strip=True) if ger_cell else ""
-        title_eng = eng_cell.get_text(strip=True) if eng_cell else ""
+        ger_cell = row.xpath(_XP_TITLE_GER)
+        eng_cell = row.xpath(_XP_TITLE_ENG)
+        title_ger = _stripped_text(ger_cell[0]) if ger_cell else ""
+        title_eng = _stripped_text(eng_cell[0]) if eng_cell else ""
 
         # Fallback: generic title from <strong> in second column (bs.to style)
         title = ""
         if not title_ger and not title_eng:
-            cols = row.find_all("td")
+            cols = row.xpath(".//td")
             if len(cols) >= 2:
-                title_tag = cols[1].find("strong")
-                title = title_tag.get_text(strip=True) if title_tag else cols[1].get_text(strip=True)
+                title_tag = cols[1].xpath(".//strong")
+                title = _stripped_text(title_tag[0]) if title_tag else _stripped_text(cols[1])
 
         # Check if watched — s.to uses 'seen', bs.to uses 'watched'
-        row_classes = row.get("class") or []
+        row_classes = (row.get("class") or "").split()
         watched = "seen" in row_classes or "watched" in row_classes
 
         ep = {"number": ep_num_int, "watched": watched}
@@ -530,7 +604,7 @@ def _parse_episodes(soup: BeautifulSoup) -> list[dict] | None:
     return episodes
 
 
-def _extract_season_languages(soup: BeautifulSoup) -> list[str]:
+def _extract_season_languages(doc) -> list[str]:
     """Return normalized language codes from the .series-language dropdown.
 
     bs.to shows available audio/subtitle languages at season/page level, not
@@ -554,12 +628,16 @@ def _extract_season_languages(soup: BeautifulSoup) -> list[str]:
     languages: list[str] = []
     seen: set[str] = set()
 
-    dropdown = soup.select_one(".series-language")
-    if not dropdown:
-        # No language dropdown means the season has no streams on bs.to.
+    if doc is None:
         return ["no_streams"]
 
-    for option in dropdown.find_all("li", class_="option"):
+    found = doc.xpath(_XP_LANGUAGE_DROPDOWN)
+    if not found:
+        # No language dropdown means the season has no streams on bs.to.
+        return ["no_streams"]
+    dropdown = found[0]
+
+    for option in dropdown.xpath(_XP_LANGUAGE_OPTIONS):
         value = str(option.get("data-value", "")).strip().lower()
         code = bs_language_map.get(value)
         if code and code not in seen:

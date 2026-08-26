@@ -32,6 +32,7 @@ from src.scraper import (  # noqa: E402
     _extract_title,
     _heading_text,
     _parse_episodes,
+    make_doc,
 )
 
 
@@ -154,18 +155,18 @@ class TestExtractTitle(unittest.TestCase):
         self.assertEqual(str(s), before)
 
 
-class TestParseEpisodesTakesSoup(unittest.TestCase):
+class TestParseEpisodesTakesDoc(unittest.TestCase):
     def test_missing_episode_table_returns_none(self):
         """No episode table at all = we don't understand this page = failure."""
         html = "<html><body><div id='seasons'></div></body></html>"
-        self.assertIsNone(_parse_episodes(soup(html)))
+        self.assertIsNone(_parse_episodes(make_doc(html)))
 
     def test_empty_but_present_table_returns_empty_list(self):
         """Table present with zero rows = a season listed before its episodes
         are uploaded. That is a real state and must NOT be an error --
         four such seasons exist in the sibling s.to project's index."""
         html = "<html><body><div class='episode-table'><tbody></tbody></div></body></html>"
-        self.assertEqual(_parse_episodes(soup(html)), [])
+        self.assertEqual(_parse_episodes(make_doc(html)), [])
 
     def test_rows_present_but_none_parseable_returns_none(self):
         html = """
@@ -173,7 +174,7 @@ class TestParseEpisodesTakesSoup(unittest.TestCase):
             <tr><td>not-a-number</td><td>junk</td></tr>
         </table>
         """
-        self.assertIsNone(_parse_episodes(soup(html)))
+        self.assertIsNone(_parse_episodes(make_doc(html)))
 
     def test_normal_row_parses(self):
         html = """
@@ -182,9 +183,28 @@ class TestParseEpisodesTakesSoup(unittest.TestCase):
             <td class="episode-title-ger">Pilot</td>
         </tr></table>
         """
-        episodes = _parse_episodes(soup(html))
+        episodes = _parse_episodes(make_doc(html))
         self.assertEqual(len(episodes), 1)
         self.assertEqual(episodes[0]["number"], 1)
+
+    def test_a_bare_table_fragment_still_parses(self):
+        """Markup whose outermost element IS the table must still parse.
+
+        lxml.html.fromstring returns a bare fragment root, so a .//table
+        search matches nothing and the page reads as unparseable -- a
+        regression the BeautifulSoup version never had, because it always
+        wrapped input in html/body. Caught by differencing the two on
+        fragment-shaped input, not by any existing test. Pins
+        document_fromstring.
+        """
+        html = "<table class='episodes'><tr><td>1</td><td><strong>Eins</strong></td></tr></table>"
+        self.assertEqual(
+            _parse_episodes(make_doc(html)), [{"number": 1, "watched": False, "title": "Eins"}]
+        )
+
+    def test_a_bare_empty_table_fragment_is_an_empty_season(self):
+        """Same shape, no rows: still [] (a real season state), not None."""
+        self.assertEqual(_parse_episodes(make_doc("<table class='episodes'></table>")), [])
 
 
 # ==================== TASK 1: unparseable season handling ====================
