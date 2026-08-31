@@ -284,7 +284,7 @@ def _cross_check_index(scraper, site_url, count, idx_mgr=None, site_slugs=None):
       - report_entry: dict with per-host mismatch details (or None if skipped).
     """
     if idx_mgr is None:
-        idx_mgr = IndexManager()
+        idx_mgr = IndexManager(SERIES_INDEX_FILE)
     idx_count = len(idx_mgr.series_index)
     if idx_count == 0:
         return None, None, None
@@ -385,7 +385,7 @@ def _probe_sites_before_scrape(scraper, idx_mgr=None):
 
     # Load the index once and reuse it for every host cross-check.
     if idx_mgr is None:
-        idx_mgr = IndexManager()
+        idx_mgr = IndexManager(SERIES_INDEX_FILE)
 
     print("\n→ Checking host availability...\n")
     results = _probe_hosts(scraper, site_urls)
@@ -522,7 +522,7 @@ def _find_vanished_to_clean(idx_mgr=None, ignored=None):
         return {}
 
     if idx_mgr is None:
-        idx_mgr = IndexManager()
+        idx_mgr = IndexManager(SERIES_INDEX_FILE)
 
     title_by_slug = {}
     for title, series in idx_mgr.series_index.items():
@@ -568,7 +568,7 @@ def _prompt_clean_vanished(idx_mgr: IndexManager | None = None):
         return False
 
     if idx_mgr is None:
-        idx_mgr = IndexManager()
+        idx_mgr = IndexManager(SERIES_INDEX_FILE)
 
     removed = 0
     for title in titles:
@@ -589,7 +589,7 @@ def _suggest_something_to_watch(idx_mgr: IndexManager | None = None):
     suggestions are shown (or fewer if not enough exist).
     """
     if idx_mgr is None:
-        idx_mgr = IndexManager()
+        idx_mgr = IndexManager(SERIES_INDEX_FILE)
 
     genre_path = os.path.join(DATA_DIR, "genre_index.json")
     genre_labels = {}
@@ -662,7 +662,7 @@ def print_header():
 def print_scraped_series_status(changes=None):
     """Print episode counts for the most recently updated series."""
     try:
-        index_manager = IndexManager()
+        index_manager = IndexManager(SERIES_INDEX_FILE)
 
         if not index_manager.series_index:
             return
@@ -825,7 +825,7 @@ def _run_scrape_and_save(
                     if slug and slug != "unknown":
                         all_slugs.add(slug)
                 scope = "new_only" if run_kwargs.get("new_only") else "all"
-                idx_mgr = IndexManager()
+                idx_mgr = IndexManager(SERIES_INDEX_FILE)
                 show_vanished_series(
                     idx_mgr.series_index,
                     all_slugs,
@@ -866,7 +866,7 @@ def _run_scrape_and_save(
                 # Only meaningful for full scrapes, not for new_only/batch/retry/single modes.
                 if scraper.all_discovered_series is not None and not run_kwargs.get("new_only"):
                     scraped_count = len(successful_data)
-                    idx_mgr2 = IndexManager()
+                    idx_mgr2 = IndexManager(SERIES_INDEX_FILE)
                     idx_count = len(idx_mgr2.series_index)
                     if scraped_count == idx_count:
                         print(f"  Index count: {idx_count}  →  match = True")
@@ -1001,7 +1001,7 @@ def scrape_unwatched():
     """Scrape only unwatched/ongoing series from the index."""
     print("\n\u2192 Scrape unwatched series (skipping fully watched)...\n")
 
-    index_manager = IndexManager()
+    index_manager = IndexManager(SERIES_INDEX_FILE)
     if not index_manager.series_index:
         print("\u2717 No series in index. Run a full scrape first (option 1).")
         return
@@ -1136,7 +1136,7 @@ def _print_single_series_status(series_data, url):
     if not series:
         return
 
-    index_manager = IndexManager()
+    index_manager = IndexManager(SERIES_INDEX_FILE)
     source = next(
         (
             s
@@ -1155,7 +1155,7 @@ def _print_single_series_status(series_data, url):
 
 def generate_report():  # pylint: disable=too-many-locals,too-many-branches
     """Generate and display a comprehensive series report."""
-    manager = IndexManager()
+    manager = IndexManager(SERIES_INDEX_FILE)
     report = manager.get_full_report()
 
     report_file = os.path.join(DATA_DIR, "series_report.json")
@@ -1440,7 +1440,7 @@ def main():
     # does not depend on that import side effect.
     configure_console()
 
-    idx_mgr = IndexManager()
+    idx_mgr = IndexManager(SERIES_INDEX_FILE)
     index_count = len(idx_mgr.series_index)
     print(f"✓ Index loaded ({os.path.abspath(SERIES_INDEX_FILE)}) ({index_count:,} entries)\n")
 

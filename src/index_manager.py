@@ -1010,21 +1010,21 @@ def show_changes(
     return total
 
 
-def _read_index_json():
+def _read_index_json(index_file):
     """Read and parse series_index.json from disk.
 
     Returns the raw parsed data (list or dict), or None on error.
     Handles missing file, corrupt JSON, and I/O errors.
     """
-    if not os.path.exists(SERIES_INDEX_FILE):
+    if not os.path.exists(index_file):
         logger.info(
             "No existing index found at %s",
-            SERIES_INDEX_FILE,
+            index_file,
         )
         return None
     try:
         with open(
-            SERIES_INDEX_FILE,
+            index_file,
             encoding="utf-8",
         ) as f:
             data = json.load(f)
@@ -1043,15 +1043,15 @@ def _read_index_json():
         return None
 
 
-def _try_restore_backup_data():
+def _try_restore_backup_data(index_file):
     """Return index data from the newest readable backup, or None.
 
     A save that failed midway can leave the index missing or truncated while
     the previous copy sits in .bak1. Loading an empty index instead makes
     every series look brand new, so the backups are consulted first.
     """
-    backup_dir = os.path.dirname(SERIES_INDEX_FILE)
-    filename = os.path.basename(SERIES_INDEX_FILE)
+    backup_dir = os.path.dirname(index_file)
+    filename = os.path.basename(index_file)
     for i in range(1, 4):
         backup_path = os.path.join(backup_dir, f"{filename}.bak{i}")
         if not os.path.exists(backup_path):
@@ -1066,9 +1066,9 @@ def _try_restore_backup_data():
     return None
 
 
-def _load_existing_index():
+def _load_existing_index(index_file=SERIES_INDEX_FILE):
     """Load current series index from disk (list or empty)."""
-    data = _read_index_json()
+    data = _read_index_json(index_file)
     return data if data is not None else []
 
 
@@ -1882,7 +1882,7 @@ def confirm_and_save_changes(new_data, description="data", active_site_url=None,
 
     try:
         if index_manager is None:
-            index_manager = IndexManager()
+            index_manager = IndexManager(SERIES_INDEX_FILE)
         series_list = [_order_series_entry(series) for series in merged.values()]
         index_manager.series_index = {s.get("title"): s for s in series_list if s.get("title")}
         index_manager.save_index()
@@ -1890,7 +1890,7 @@ def confirm_and_save_changes(new_data, description="data", active_site_url=None,
         logger.info(
             "Saved %d series to %s",
             len(series_list),
-            SERIES_INDEX_FILE,
+            index_manager.index_file,
         )
         return True, changes
     except Exception as exc:  # pylint: disable=broad-exception-caught
@@ -1902,7 +1902,8 @@ def confirm_and_save_changes(new_data, description="data", active_site_url=None,
 class IndexManager:
     """Manages the local series index file."""
 
-    def __init__(self):
+    def __init__(self, index_file):
+        self.index_file = index_file
         self.series_index = {}
         self.load_index()
 
@@ -1917,13 +1918,13 @@ class IndexManager:
     def _load_index_unlocked(self):
         """Actual index loading logic."""
         self.series_index = {}
-        data = _read_index_json()
+        data = _read_index_json(self.index_file)
         if data is None:
-            data = _try_restore_backup_data()
+            data = _try_restore_backup_data(self.index_file)
             if data is None:
                 return
             print("[INFO] Index unreadable — restored from backup.")
-            logger.warning("Index unreadable at %s; restored from backup", SERIES_INDEX_FILE)
+            logger.warning("Index unreadable at %s; restored from backup", self.index_file)
         try:
             if isinstance(data, list):
                 self.series_index = {item.get("title"): item for item in data if item.get("title")}
@@ -1988,7 +1989,7 @@ class IndexManager:
         try:
             self._reconcile_derived_counts()
             series_list = [_order_series_entry(series) for series in self.series_index.values()]
-            _atomic_write_json(SERIES_INDEX_FILE, series_list)
+            _atomic_write_json(self.index_file, series_list)
             logger.info("Saved index with %d series", len(self.series_index))
         except Exception as exc:  # pylint: disable=broad-exception-caught
             print(f"[ERROR] Failed to save index: {exc}")

@@ -24,7 +24,7 @@ import time
 from datetime import datetime
 from typing import Protocol
 
-from config.config import DATA_DIR, NUM_WORKERS, SITE_URL
+from config.config import DATA_DIR, NUM_WORKERS, SERIES_INDEX_FILE, SITE_URL
 from src.atomic_io import atomic_write_json
 from src.index_manager import IndexManager, get_episode_counts, paginate_list
 from src.scraper import BsToScraper, ProgressWriter, _extract_title, _is_logged_in, make_soup
@@ -449,7 +449,7 @@ def _load_snapshot(data: dict) -> dict:
     counting -- lives here once instead of as two independent copies that a
     future fix to the join would have to be applied to twice.
     """
-    index = IndexManager()
+    index = IndexManager(SERIES_INDEX_FILE)
     by_slug = _index_by_slug(index)
     return build_snapshot(data, by_slug)
 
