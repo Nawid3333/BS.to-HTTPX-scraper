@@ -251,8 +251,7 @@ class PhaseProfiler:
             count = self._counts[name]
             share = seconds / total * 100 if total else 0
             lines.append(
-                f"  {name:<12} {seconds:8.1f}s  {share:5.1f}%  "
-                f"n={count:<6} avg={seconds / count * 1000:7.1f}ms"
+                f"  {name:<12} {seconds:8.1f}s  {share:5.1f}%  n={count:<6} avg={seconds / count * 1000:7.1f}ms"
             )
         print("\n".join(lines))
 
@@ -301,7 +300,6 @@ def _retry_after_seconds(resp) -> float | None:
         return float(raw)
     except (TypeError, ValueError):
         return None
-
 
 
 # -- Rename matching helpers -----------------------------------------
@@ -457,6 +455,7 @@ def _looks_like_login_page(html: str) -> bool:
         return True
     lowered = html.lower()
     return "login" in lowered or "anmelden" in lowered
+
 
 _SERIE_PATH_RE = re.compile(r"(/serie/[^/]+)")
 _UTILITY_PAGES = {
@@ -2225,8 +2224,7 @@ class BsToScraper:  # pylint: disable=too-many-instance-attributes
         print(f"\u2192 New series to scrape: {len(truly_new)} (out of {total})")
         if rename_titles:
             print(
-                f"  ({len(rename_titles)} possible rename(s) of vanished series "
-                f"flagged below; all are still scraped)"
+                f"  ({len(rename_titles)} possible rename(s) of vanished series flagged below; all are still scraped)"
             )
         if not truly_new:
             if rename_titles:
@@ -2322,19 +2320,19 @@ class BsToScraper:  # pylint: disable=too-many-instance-attributes
         client = None
         try:
             client = httpx.AsyncClient(
-            http2=True,
+                http2=True,
                 headers={"User-Agent": UA},
                 timeout=httpx.Timeout(REQUEST_TIMEOUT, connect=10.0),
                 follow_redirects=True,
                 limits=httpx.Limits(
-                # One worker now has up to SEASON_CONCURRENCY season fetches
-                # in flight at once, so a 2-connection pool would serialise
-                # the fan-out straight back into the queue it was meant to
-                # remove. Keepalive matches it so those connections survive
-                # between series instead of re-handshaking each time.
-                max_connections=self.pool_workers * SEASON_CONCURRENCY + 4,
-                max_keepalive_connections=self.pool_workers * SEASON_CONCURRENCY + 4,
-            ),
+                    # One worker now has up to SEASON_CONCURRENCY season fetches
+                    # in flight at once, so a 2-connection pool would serialise
+                    # the fan-out straight back into the queue it was meant to
+                    # remove. Keepalive matches it so those connections survive
+                    # between series instead of re-handshaking each time.
+                    max_connections=self.pool_workers * SEASON_CONCURRENCY + 4,
+                    max_keepalive_connections=self.pool_workers * SEASON_CONCURRENCY + 4,
+                ),
             )
             resp = await client.get(_login_url(site_url))
             ok = resp.status_code < 500 and _looks_like_login_page(resp.text)

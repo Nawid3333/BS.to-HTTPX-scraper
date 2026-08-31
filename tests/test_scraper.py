@@ -184,6 +184,7 @@ class TestParseEpisodesTakesDoc(unittest.TestCase):
         </tr></table>
         """
         episodes = _parse_episodes(make_doc(html))
+        assert episodes is not None
         self.assertEqual(len(episodes), 1)
         self.assertEqual(episodes[0]["number"], 1)
 
@@ -198,9 +199,7 @@ class TestParseEpisodesTakesDoc(unittest.TestCase):
         document_fromstring.
         """
         html = "<table class='episodes'><tr><td>1</td><td><strong>Eins</strong></td></tr></table>"
-        self.assertEqual(
-            _parse_episodes(make_doc(html)), [{"number": 1, "watched": False, "title": "Eins"}]
-        )
+        self.assertEqual(_parse_episodes(make_doc(html)), [{"number": 1, "watched": False, "title": "Eins"}])
 
     def test_a_bare_empty_table_fragment_is_an_empty_season(self):
         """Same shape, no rows: still [] (a real season state), not None."""
@@ -258,7 +257,7 @@ class TestScrapeOneSeriesUnparseableSeason(unittest.TestCase):
             }
         )
         info = {"url": self.SERIES_URL, "link": "/serie/test-series", "title": "Test Series"}
-        return asyncio.run(scraper._scrape_one_series(client, info))
+        return asyncio.run(scraper._scrape_one_series(client, info))  # type: ignore[arg-type]
 
     def test_missing_episode_table_is_an_error_result(self):
         result = self._run("<html><body>no episode table here</body></html>")
@@ -286,7 +285,6 @@ class TestScrapeOneSeriesUnparseableSeason(unittest.TestCase):
         result = self._run(season_html)
         self.assertFalse(result.get("_error"))
         self.assertEqual(result["total_episodes"], 1)
-
 
 
 # ==================== season counter drift (One Piece S23 regression) ====
@@ -483,6 +481,7 @@ class TestBackupRotation(TempFileCase):
         path = os.path.join(self.dir.name, "fresh.json")
         atomic_write_json(path, {"a": 1})
         self.assertFalse(os.path.exists(f"{path}.bak1"))
+
 
 if __name__ == "__main__":
     unittest.main()

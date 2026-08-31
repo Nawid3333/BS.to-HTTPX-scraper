@@ -20,6 +20,9 @@ Uses **httpx** (no browser needed) with a multi-session architecture for fast, p
 - **Failed series retry** — automatically tracks failures for later bulk retry
 - **Pause/resume** — create a `.pause_scraping` file to gracefully pause workers
 - **Report generation** — full statistics with ongoing series export
+- **Genre completion stats** — option 7 scrapes every series page for its genres into a separate
+  `data/genre_index.json`, then reports watched/total per genre. Self-contained: it never writes
+  `series_index.json`
 - **Data integrity checks** — detects episode count drops, season removals, watched-status corruption, and title changes before merging; offers to delete & rescrape critical series
 - **Atomic file writes** — all JSON writes use temp file + replace to prevent corruption
 - **Disk space check** — warns before scraping if free space is below 100 MB
@@ -97,6 +100,7 @@ python main.py
 | 4   | **Generate full report**            | Statistics report saved to JSON with ongoing series export.                |
 | 5   | **Single link / batch add**         | Add one series by pasting its bs.to URL, or batch-import from a text file. |
 | 6   | **Retry failed series**             | Bulk retry all series that failed in previous runs.                        |
+| 7   | **Watch Stats of Categories**       | Genre completion stats: scrape genres, show watched/total per genre, export. |
 | 0   | **Exit**                            | Clean exit.                                                                |
 
 > **Pausing scraping:** there is no dedicated menu option. To gracefully pause workers, create a `.pause_scraping` file in the `data/` directory (see [Pause/resume](#pauseresume) below).
@@ -180,12 +184,14 @@ The scraper re-validates ignored series at the start of every run and checks the
 │   └── config.py            # Settings (credentials, workers, paths)
 ├── src/
 │   ├── atomic_io.py         # Durable atomic JSON writes (shared by every writer)
+│   ├── genre_stats.py       # Genre completion stats (option 7), self-contained
 │   ├── index_manager.py     # Merge, change detection, stats, reports
 │   └── scraper.py           # httpx scraping engine
 └── tests/
     ├── __init__.py
     ├── capture_fixtures.py  # Regenerates test fixtures from the live site
     ├── fixture_spec.py      # Which parser outputs the fixtures pin
+    ├── test_genre_stats.py  # Genre parser, snapshot, diff and storage tests
     ├── test_golden_parse.py # Parser output pinned against real captured pages
     └── test_scraper.py      # Unit + regression tests
 ```

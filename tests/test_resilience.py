@@ -69,7 +69,7 @@ def make_index_manager(path):
     """IndexManager takes an explicit path in two projects, a global in bs.to."""
     _set_module_index_path(im, path)
     try:
-        return im.IndexManager(path)
+        return im.IndexManager(path)  # type: ignore[call-arg]  # bs.to's IndexManager takes no argument
     except TypeError:
         return im.IndexManager()
 
@@ -204,7 +204,7 @@ class TestTransientErrorDoesNotFailTheSeries(QuietCase):
         scraper = SCRAPER_CLS()
         client = self.FlakyClient()
         info = {"url": series_url("demo"), "link": series_url("demo"), "title": "Demo"}
-        asyncio.run(scraper._scrape_one_series(client, info))
+        asyncio.run(scraper._scrape_one_series(client, info))  # type: ignore[arg-type]
         self.assertGreater(client.calls, 1, "the series page must go through the retrying fetch")
 
     def test_retry_eventually_gives_up(self):
@@ -212,7 +212,7 @@ class TestTransientErrorDoesNotFailTheSeries(QuietCase):
         scraper = SCRAPER_CLS()
         client = self.FlakyClient(fail_times=99)
         info = {"url": series_url("demo"), "link": series_url("demo"), "title": "Demo"}
-        result = asyncio.run(scraper._scrape_one_series(client, info))
+        result = asyncio.run(scraper._scrape_one_series(client, info))  # type: ignore[arg-type]
         self.assertTrue(result.get("_error"))
         self.assertLessEqual(client.calls, sc._MAX_ATTEMPTS, "must not retry forever")
 
@@ -239,17 +239,14 @@ class TestWorkerCrashKeepsScrapedWork(QuietCase):
                 "seasons": [],
             }
 
-        scraper._scrape_one_series = fake_scrape
-        scraper._acquire_client = lambda: asyncio.sleep(0, result=object())
+        scraper._scrape_one_series = fake_scrape  # type: ignore[method-assign]
+        scraper._acquire_client = lambda: asyncio.sleep(0, result=object())  # type: ignore[method-assign]
         scraper._release_client = lambda: asyncio.sleep(0)
         return scraper
 
     @staticmethod
     def _items(n):
-        return [
-            {"url": series_url(f"s{i}"), "link": series_url(f"s{i}"), "title": f"S{i}"}
-            for i in range(n)
-        ]
+        return [{"url": series_url(f"s{i}"), "link": series_url(f"s{i}"), "title": f"S{i}"} for i in range(n)]
 
     def test_a_series_level_crash_is_contained(self):
         """This project turns a per-series exception into a failed entry.
@@ -343,7 +340,6 @@ class TestRenameGuessNeverSkipsAScrape(QuietCase):
         self.assertEqual(hits, {"Steins;Gate 0"})
 
 
-
 class TestShortCatalogueIsQueried(TempDirCase):
     """A truncated catalogue makes every absent series look vanished."""
 
@@ -432,9 +428,20 @@ class TestMergeDoesNotMutateItsInputs(QuietCase):
         new = self._fixture()
         snapshot = copy.deepcopy(new)
         allowed = dict.fromkeys(
-            ["new_series", "new_episodes", "watched", "unwatched", "subscribe",
-             "unsubscribe", "watchlist_add", "watchlist_remove", "title_ger",
-             "title_eng", "episode_remove", "season_remove"],
+            [
+                "new_series",
+                "new_episodes",
+                "watched",
+                "unwatched",
+                "subscribe",
+                "unsubscribe",
+                "watchlist_add",
+                "watchlist_remove",
+                "title_ger",
+                "title_eng",
+                "episode_remove",
+                "season_remove",
+            ],
             True,
         )
         self._merge(old, new, allowed)
@@ -444,9 +451,20 @@ class TestMergeDoesNotMutateItsInputs(QuietCase):
         old = {}
         new = self._fixture()
         deny = dict.fromkeys(
-            ["new_series", "new_episodes", "watched", "unwatched", "subscribe",
-             "unsubscribe", "watchlist_add", "watchlist_remove", "title_ger",
-             "title_eng", "episode_remove", "season_remove"],
+            [
+                "new_series",
+                "new_episodes",
+                "watched",
+                "unwatched",
+                "subscribe",
+                "unsubscribe",
+                "watchlist_add",
+                "watchlist_remove",
+                "title_ger",
+                "title_eng",
+                "episode_remove",
+                "season_remove",
+            ],
             False,
         )
         allow = {**deny, "new_series": True, "new_episodes": True, "watched": True}
@@ -460,7 +478,7 @@ class TestMergeDoesNotMutateItsInputs(QuietCase):
 
 
 class TestDeleteAllNeedsConfirmation(QuietCase):
-    """"a" deletes every remaining entry unseen; it has to be confirmed."""
+    """ "a" deletes every remaining entry unseen; it has to be confirmed."""
 
     @staticmethod
     def _entries(n):
@@ -551,8 +569,8 @@ class TestSingleUrlRunReportsProgress(unittest.TestCase):
         async def fake_scrape(_client, info):
             return dict(result, url=info["url"], link=info["link"])
 
-        scraper._scrape_one_series = fake_scrape
-        scraper._acquire_client = lambda: asyncio.sleep(0, result=object())
+        scraper._scrape_one_series = fake_scrape  # type: ignore[method-assign]
+        scraper._acquire_client = lambda: asyncio.sleep(0, result=object())  # type: ignore[method-assign]
         scraper._release_client = lambda: asyncio.sleep(0)
         scraper.clear_checkpoint = lambda: None
 
@@ -756,10 +774,7 @@ class TestStartupProbeFetchesHostsTogether(QuietCase):
             return [{"site_url": url, "ok": True, "status_code": 200} for url in site_urls]
 
         def fake_fetch(scraper, site_urls):
-            return {
-                url: ((10, {"a"}) if served.get(url) else (None, set()))
-                for url in site_urls
-            }
+            return {url: ((10, {"a"}) if served.get(url) else (None, set())) for url in site_urls}
 
         scraper = SCRAPER_CLS()
         with (
@@ -917,9 +932,7 @@ class TestHostChecksTargetTheRightHost(QuietCase):
     def _probe(self, status=200, body="Please Login"):
         requests = []
         response = _CannedResponse(status, body)
-        with mock.patch.object(
-            sc.httpx, "AsyncClient", lambda *a, **kw: _RecordingClient(requests, response)
-        ):
+        with mock.patch.object(sc.httpx, "AsyncClient", lambda *a, **kw: _RecordingClient(requests, response)):
             result = asyncio.run(SCRAPER_CLS()._probe_one_site(self.HOST))
         return result, requests
 
@@ -957,7 +970,7 @@ class TestHostChecksTargetTheRightHost(QuietCase):
 
         scraper._get = record_get
         with contextlib.suppress(RuntimeError):
-            asyncio.run(scraper._get_all_series(object()))
+            asyncio.run(scraper._get_all_series(object()))  # type: ignore[arg-type]
 
         self.assertTrue(fetched, "no catalogue request was made at all")
         self.assertTrue(fetched[0].startswith(self.HOST), fetched[0])
@@ -965,8 +978,7 @@ class TestHostChecksTargetTheRightHost(QuietCase):
     # ── what counts as a login page ────────────────────────────────────────
 
     ACCEPTED = {
-        "a reworded page that still has a password field":
-            '<html><form><input type="password" name="p"></form></html>',
+        "a reworded page that still has a password field": '<html><form><input type="password" name="p"></form></html>',
         "single-quoted type": "<input type='password'>",
         "unquoted type": "<input type=password>",
         "german wording": "<html><body>Bitte anmelden</body></html>",

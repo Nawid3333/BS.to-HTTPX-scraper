@@ -8,25 +8,28 @@ Supports checkpoint resume, batch URL import, and interactive
 change confirmation.
 """
 
+from __future__ import annotations
+
 import asyncio
 import contextlib
 import json
 import logging
 import logging.handlers
 import os
+import random
 import re
 import shutil
 import sys
 import time
 from collections import Counter
 from datetime import datetime
+from typing import TYPE_CHECKING
 from urllib.parse import urlparse
 
-# Ensure project root is on sys.path so imports work from any cwd
-sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
+if TYPE_CHECKING:
+    from src.index_manager import IndexManager
 
-# pylint: disable=wrong-import-position
-from config.config import (  # noqa: E402
+from config.config import (
     DATA_DIR,
     DEFAULT_BATCH_FILE,
     LOG_FILE,
@@ -38,6 +41,7 @@ from config.config import (  # noqa: E402
     VALID_SERIES_HOSTS,
     configure_console,
 )
+from src import genre_stats  # noqa: E402
 from src.index_manager import (  # noqa: E402
     IndexManager,
     _extract_slug,
@@ -459,6 +463,195 @@ def _probe_sites_before_scrape(scraper, idx_mgr=None):
     return scraper.site_url
 
 
+def _load_ignored_vanished():
+    """Load slugs the user has chosen not to delete."""
+    path = os.path.join(DATA_DIR, "ignored_vanished.json")
+    if not os.path.exists(path):
+        return set()
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, list):
+            return set(data)
+        if isinstance(data, dict):
+            return set(data.get("slugs", []))
+    except (json.JSONDecodeError, OSError) as exc:
+        logger.warning("Could not read ignored vanished file: %s", exc)
+    return set()
+
+
+def _save_ignored_vanished(slugs):
+    """Persist slugs the user has chosen not to delete."""
+    path = os.path.join(DATA_DIR, "ignored_vanished.json")
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump({"slugs": sorted(slugs)}, f, indent=2, ensure_ascii=False)
+    except OSError as exc:
+        logger.warning("Could not save ignored vanished file: %s", exc)
+
+
+def _find_vanished_to_clean(idx_mgr=None, ignored=None):
+    """Return title->slug mapping for vanished entries that can be cleaned.
+
+    Reads the most recent mismatch report. Only slugs reported as
+    'only_in_index' by every reachable host are considered vanished.
+    Slugs in the ignored set are skipped.
+    """
+    if ignored is None:
+        ignored = _load_ignored_vanished()
+    report_path = os.path.join(DATA_DIR, "mismatch_report.json")
+    if not os.path.exists(report_path):
+        return {}
+    try:
+        with open(report_path, encoding="utf-8") as f:
+            report = json.load(f)
+    except (json.JSONDecodeError, OSError) as exc:
+        logger.warning("Could not read mismatch report: %s", exc)
+        return {}
+
+    host_reports = report.get("hosts", [])
+    if not host_reports:
+        return {}
+
+    in_only_sets = [set(h.get("only_in_index", [])) for h in host_reports]
+    if not in_only_sets or not any(in_only_sets):
+        return {}
+
+    vanished_slugs = set.intersection(*in_only_sets) - ignored
+    if not vanished_slugs:
+        return {}
+
+    if idx_mgr is None:
+        idx_mgr = IndexManager()
+
+    title_by_slug = {}
+    for title, series in idx_mgr.series_index.items():
+        slug = _extract_slug(series)
+        if slug in vanished_slugs:
+            title_by_slug[slug] = title
+
+    return title_by_slug
+
+
+def _notify_vanished_at_startup(idx_mgr=None):
+    """Print a notification when vanished entries exist, without prompting."""
+    title_by_slug = _find_vanished_to_clean(idx_mgr)
+    if not title_by_slug:
+        return
+    print(f"\n  ⚠ {len(title_by_slug)} series in index are not on any reachable host.")
+    print("  → Run option 1 or 2 to verify, then choose whether to remove them.")
+
+
+def _prompt_clean_vanished(idx_mgr: IndexManager | None = None):
+    """Ask to delete vanished entries and update the ignored list.
+
+    Returns True if anything was removed.
+    """
+    title_by_slug = _find_vanished_to_clean(idx_mgr)
+    if not title_by_slug:
+        return False
+
+    titles = sorted(title_by_slug.values())
+    print(f"\n⚠ {len(titles)} series found in index but not on site:")
+    for title in titles:
+        print(f"    - {title}")
+
+    choice = input("\nDelete these vanished entries from the index? (y/n/ignore): ").strip().lower()
+    if choice == "ignore":
+        ignored = _load_ignored_vanished()
+        ignored.update(title_by_slug)
+        _save_ignored_vanished(ignored)
+        print(f"  Ignored {len(title_by_slug)} vanished slug(s) — will not prompt again.")
+        return False
+    if choice != "y":
+        print("  Cancelled — no changes made.")
+        return False
+
+    if idx_mgr is None:
+        idx_mgr = IndexManager()
+
+    removed = 0
+    for title in titles:
+        if title in idx_mgr.series_index:
+            del idx_mgr.series_index[title]
+            removed += 1
+    idx_mgr.save_index()
+    print(f"\n✓ Removed {removed} vanished series from index.")
+    logger.info("Removed %d vanished series from index after scrape: %s", removed, titles[:10])
+    return True
+
+
+def _suggest_something_to_watch(idx_mgr: IndexManager | None = None):
+    """Suggest unwatched series from the index, optionally filtered by genre.
+
+    Loads the genre index and presents a list of unwatched series. The user
+    can filter by genre or pick from all unwatched series. Five random
+    suggestions are shown (or fewer if not enough exist).
+    """
+    if idx_mgr is None:
+        idx_mgr = IndexManager()
+
+    genre_path = os.path.join(DATA_DIR, "genre_index.json")
+    genre_labels = {}
+    series_genres = {}
+    if os.path.exists(genre_path):
+        try:
+            with open(genre_path, encoding="utf-8") as f:
+                genre_data = json.load(f)
+            genre_labels = genre_data.get("labels", {})
+            series_genres = genre_data.get("series", {})
+        except (json.JSONDecodeError, OSError) as exc:
+            logger.warning("Could not read genre index: %s", exc)
+
+    choices = {"all": "All genres / no filter"}
+    for key, label in sorted(genre_labels.items()):
+        choices[key] = label
+
+    print("\nSuggest something to watch")
+    print("Available filters:")
+    for key, label in choices.items():
+        print(f"  {key}: {label}")
+
+    selected = input("\nEnter genre key (or 'all'): ").strip().lower()
+    if selected not in choices:
+        print("\u2717 Invalid genre key. Using 'all'.")
+        selected = "all"
+
+    candidates = []
+    for title, series in idx_mgr.series_index.items():
+        if not isinstance(series, dict):
+            continue
+        watched = series.get("watched_episodes", 0)
+        total = series.get("total_episodes", 0)
+        if watched == 0 and total > 0:
+            if selected != "all":
+                genres = series_genres.get(title, [])
+                if selected not in genres:
+                    continue
+            candidates.append(series)
+
+    if not candidates:
+        suffix = f" for genre '{choices[selected]}'" if selected != "all" else ""
+        print(f"\n\u2713 No unwatched series found{suffix}.")
+        return
+
+    random.shuffle(candidates)
+    sample = candidates[: max(5, len(candidates))]
+
+    print(f"\n\ud83c\udfb2 {len(sample)} suggestion(s) from {len(candidates)} unwatched series:")
+    for i, series in enumerate(sample, 1):
+        title = series.get("title", "Unknown")
+        link = series.get("url") or series.get("link", "")
+        total = series.get("total_episodes", 0)
+        genres = series_genres.get(title, [])
+        genre_str = ", ".join(genre_labels.get(g, g) for g in genres) if genres else "\u2014"
+        print(f"\n  {i}. {title}")
+        print(f"     Link: {link}")
+        print(f"     Episodes: {total}")
+        print(f"     Genres: {genre_str}")
+    print("\nCopy a link and open it in your browser to check it out.")
+
+
 def print_header():
     """Print the application header banner."""
     print("=" * 60)
@@ -545,6 +738,8 @@ def show_menu():
     print("  4. Generate full report")
     print("  5. Single link / batch add")
     print("  6. Retry failed series from last run")
+    print("  7. Watch Stats of Categories")
+    print("  8. Suggest something to watch")
     print("  0. Exit\n")
 
 
@@ -680,6 +875,9 @@ def _run_scrape_and_save(
                         sign = "+" if diff > 0 else ""
                         print(f"  Index count: {idx_count}  →  match = False ({sign}{diff} difference)")
                         print("  → Vanished/renamed series were already checked above.")
+                # After full or new-only scrape, offer to clean vanished entries.
+                if run_kwargs.get("new_only") or not run_kwargs.get("new_only"):
+                    _prompt_clean_vanished(idx_mgr2)
         else:
             if run_kwargs.get("retry_failed") and scraper.failed_links:
                 n = len(scraper.failed_links)
@@ -1259,15 +1457,16 @@ def main():
 
     scraper = BsToScraper()
     _probe_sites_before_scrape(scraper, idx_mgr=idx_mgr)
+    _notify_vanished_at_startup(idx_mgr)
 
     while True:
         show_menu()
-        choice = input("Enter your choice (0-6): ").strip()
-        if not choice.isdigit() or not 0 <= int(choice) <= 6:
-            print("\u2717 Invalid choice. Please enter a number between 0 and 6.")
+        choice = input("Enter your choice (0-8): ").strip()
+        if not choice.isdigit() or not 0 <= int(choice) <= 8:
+            print("\u2717 Invalid choice. Please enter a number between 0 and 8.")
             continue
 
-        if choice in ["1", "2", "3", "5", "6"] and not check_disk_space():
+        if choice in ["1", "2", "3", "5", "6", "7", "8"] and not check_disk_space():
             print("\u26a0 Aborting due to low disk space.")
             continue
 
@@ -1283,10 +1482,31 @@ def main():
             single_or_batch_add()
         elif choice == "6":
             retry_failed_series()
+        elif choice == "7":
+            genre_stats.menu(ACTIVE_SITE_URL)
+        elif choice == "8":
+            _suggest_something_to_watch(idx_mgr)
         elif choice == "0":
             print("\n\u2713 Goodbye!\n")
             break
 
 
+def _run_cli() -> int:
+    """Run main() and return a process exit code.
+
+    Separate from main() so tests and packaging entry points can call it.
+    """
+    try:
+        main()
+    except KeyboardInterrupt:
+        print("\n  interrupted.")
+        return 130
+    except SystemExit as exc:
+        if exc.code is None:
+            return 0
+        return exc.code if isinstance(exc.code, int) else 1
+    return 0
+
+
 if __name__ == "__main__":
-    main()
+    sys.exit(_run_cli())

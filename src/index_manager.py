@@ -910,14 +910,10 @@ def _detect_episode_changes(  # pylint: disable=too-many-branches
         # applied only with the user's approval, which makes all three
         # projects behave the same way.
         old_labels = {
-            season.get("season", "")
-            for season in old_series.get("seasons", [])
-            if season and isinstance(season, dict)
+            season.get("season", "") for season in old_series.get("seasons", []) if season and isinstance(season, dict)
         }
         new_labels = {
-            season.get("season", "")
-            for season in new_series.get("seasons", [])
-            if season and isinstance(season, dict)
+            season.get("season", "") for season in new_series.get("seasons", []) if season and isinstance(season, dict)
         }
         for s_label in sorted(old_labels - new_labels):
             changes["removed_seasons"].append((title, s_label))
