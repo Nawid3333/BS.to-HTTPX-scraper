@@ -14,6 +14,7 @@ import re
 import shutil
 from collections import defaultdict
 from datetime import datetime
+from typing import Any, TypeVar
 from urllib.parse import urlparse
 
 from config.config import (
@@ -1339,23 +1340,36 @@ def _prompt_watch_status_changes(  # pylint: disable=too-many-branches
 
 _SCALARS = {str, int, float, bool, type(None)}
 
+# Mirrors copy.deepcopy's own signature: the copy has the type of the original.
+# Without this the return widens to dict | list | Any, and every later
+# subscript of the merged index is flagged as a possible list index.
+_Copyable = TypeVar("_Copyable")
 
-def fast_copy(x):
+
+def fast_copy(x: _Copyable) -> _Copyable:
     """Deep copy JSON-like data faster, fall back to copy.deepcopy otherwise.
 
     Dicts and lists are rebuilt recursively so the result is never aliased.
     JSON scalars are immutable and returned as-is. Anything else (tuples,
     sets, dates, custom objects) is handed to copy.deepcopy so behaviour is
     identical to the original implementation for every possible input.
+
+    The body works through a deliberately untyped alias: the signature's
+    promise -- the copy has the type of the original -- is one a checker
+    cannot verify from a freshly built dict or list, and stating it this way
+    keeps that promise without scattering casts through the recursion.
     """
-    t = type(x)
-    if t is dict:
-        return {k: fast_copy(v) for k, v in x.items()}
-    if t is list:
-        return [fast_copy(v) for v in x]
-    if t in _SCALARS:
-        return x
-    return copy.deepcopy(x)
+    value: Any = x
+    copied: Any
+    if type(value) is dict:
+        copied = {k: fast_copy(v) for k, v in value.items()}
+    elif type(value) is list:
+        copied = [fast_copy(v) for v in value]
+    elif type(value) in _SCALARS:
+        copied = value
+    else:
+        copied = copy.deepcopy(value)
+    return copied
 
 
 def _merge_series_data(

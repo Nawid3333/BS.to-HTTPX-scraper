@@ -40,6 +40,7 @@ from config.config import (
     USERNAME,
     VALID_SERIES_HOSTS,
     configure_console,
+    ensure_env_file,
 )
 from src import genre_stats  # noqa: E402
 from src.index_manager import (  # noqa: E402
@@ -693,12 +694,12 @@ def _prompt_genre_choice(choices: dict[str, str], *, allow_back: bool = True) ->
             import tty
 
             fd = sys.stdin.fileno()
-            old = termios.tcgetattr(fd)
+            old = termios.tcgetattr(fd)  # pyright: ignore[reportAttributeAccessIssue]
             try:
-                tty.setcbreak(fd)
+                tty.setcbreak(fd)  # pyright: ignore[reportAttributeAccessIssue]
                 return sys.stdin.read(1)
             finally:
-                termios.tcsetattr(fd, termios.TCSADRAIN, old)
+                termios.tcsetattr(fd, termios.TCSADRAIN, old)  # pyright: ignore[reportAttributeAccessIssue]
         except Exception:
             return None
 
@@ -1078,6 +1079,9 @@ def _run_scrape_and_save(
                 logger.info(success_msg)
                 # Final cross-check: scraped count vs index count
                 # Only meaningful for full scrapes, not for new_only/batch/retry/single modes.
+                # Left as None on the paths that skip the cross-check below;
+                # _prompt_clean_vanished builds its own manager in that case.
+                idx_mgr2 = None
                 if scraper.all_discovered_series is not None and not run_kwargs.get("new_only"):
                     scraped_count = len(successful_data)
                     idx_mgr2 = IndexManager(SERIES_INDEX_FILE)
@@ -1090,8 +1094,7 @@ def _run_scrape_and_save(
                         print(f"  Index count: {idx_count}  →  match = False ({sign}{diff} difference)")
                         print("  → Vanished/renamed series were already checked above.")
                 # After full or new-only scrape, offer to clean vanished entries.
-                if run_kwargs.get("new_only") or not run_kwargs.get("new_only"):
-                    _prompt_clean_vanished(idx_mgr2)
+                _prompt_clean_vanished(idx_mgr2)
         else:
             if run_kwargs.get("retry_failed") and scraper.failed_links:
                 n = len(scraper.failed_links)
@@ -1710,6 +1713,16 @@ def _run_cli() -> int:
 
     Separate from main() so tests and packaging entry points can call it.
     """
+    # A fresh install has no .env anywhere, so write the template out rather than
+    # leaving the user a filename to hunt for. Deliberately non-fatal: the
+    # credential check further in reports what still needs filling in.
+    created = ensure_env_file()
+    if created:
+        print("")
+        print("Created a credentials file at:")
+        print(f"    {created}")
+        print("Fill in your details there, then run this again.")
+        print("")
     try:
         main()
     except KeyboardInterrupt:
