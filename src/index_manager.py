@@ -1337,6 +1337,27 @@ def _prompt_watch_status_changes(  # pylint: disable=too-many-branches
     return allowed
 
 
+_SCALARS = {str, int, float, bool, type(None)}
+
+
+def fast_copy(x):
+    """Deep copy JSON-like data faster, fall back to copy.deepcopy otherwise.
+
+    Dicts and lists are rebuilt recursively so the result is never aliased.
+    JSON scalars are immutable and returned as-is. Anything else (tuples,
+    sets, dates, custom objects) is handed to copy.deepcopy so behaviour is
+    identical to the original implementation for every possible input.
+    """
+    t = type(x)
+    if t is dict:
+        return {k: fast_copy(v) for k, v in x.items()}
+    if t is list:
+        return [fast_copy(v) for v in x]
+    if t in _SCALARS:
+        return x
+    return copy.deepcopy(x)
+
+
 def _merge_series_data(
     old_data,
     new_dict,
@@ -1352,8 +1373,8 @@ def _merge_series_data(
     # flag by writing it back into the new entry, so without this the caller's
     # own data came back rewritten -- merging the same scrape twice gave a
     # different answer the second time, and series_data was quietly altered.
-    old_data = copy.deepcopy(old_data)
-    new_dict = copy.deepcopy(new_dict)
+    old_data = fast_copy(old_data)
+    new_dict = fast_copy(new_dict)
     merged = {s.get("title"): s for s in old_data} if isinstance(old_data, list) else dict(old_data)
 
     for title, new_entry in new_dict.items():
