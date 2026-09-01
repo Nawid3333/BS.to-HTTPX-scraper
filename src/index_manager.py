@@ -1897,6 +1897,7 @@ def confirm_and_save_changes(new_data, description="data", active_site_url=None,
         changes["removed_seasons"] = []
 
     # Check for episode count mismatches before merging
+    pending_rescrape = None
     mismatches = _detect_episode_count_mismatches(old_data, new_dict)
     if mismatches:
         proceed, rescrape_data = _prompt_episode_mismatches(mismatches, old_data, active_site_url=active_site_url)
@@ -1904,15 +1905,18 @@ def confirm_and_save_changes(new_data, description="data", active_site_url=None,
             # User chose to delete & rescrape critical series
             print(f"\n→ Preparing to rescrape {len(rescrape_data['titles'])} critical series...")
 
-            # Return rescrape data so main.py can handle the rescraping.
-            return (
-                {
-                    "action": "rescrape",
-                    "urls": rescrape_data["urls"],
-                    "titles": rescrape_data["titles"],
-                },
-                None,
-            )
+            # Held, not returned. Returning here used to skip the merge
+            # entirely, so every approval the user had just given for every
+            # *other* series in the run was discarded with it -- the sibling
+            # s.to run that found this lost an approved 7->12 watch change and
+            # re-prompted for it on the next two scrapes. The rescrape
+            # concerns one series; the rest of the run still has to be saved,
+            # so this is handed back at the end instead, after the merge.
+            pending_rescrape = {
+                "action": "rescrape",
+                "urls": rescrape_data["urls"],
+                "titles": rescrape_data["titles"],
+            }
         elif not proceed:
             print("✗ Merge cancelled due to episode count mismatches.")
             return {"action": "cancel"}, None
@@ -1933,7 +1937,7 @@ def confirm_and_save_changes(new_data, description="data", active_site_url=None,
             "No changes to save for %s.",
             description,
         )
-        return True, changes
+        return (pending_rescrape or True), changes
 
     answer = input("\nSave these changes? (y/n): ").strip().lower()
     if answer != "y":
@@ -1953,7 +1957,7 @@ def confirm_and_save_changes(new_data, description="data", active_site_url=None,
             len(series_list),
             index_manager.index_file,
         )
-        return True, changes
+        return (pending_rescrape or True), changes
     except Exception as exc:  # pylint: disable=broad-exception-caught
         print(f"\u2717 Failed to save: {exc}")
         logger.error("Failed to save index: %s", exc)
