@@ -248,12 +248,23 @@ class TestScrapeOneSeriesUnparseableSeason(unittest.TestCase):
     </body></html>
     """
 
-    def _run(self, season_html: str) -> dict:
+    # Every real season page carries the site chrome, and the logout link in
+    # it is what proves the page was served to a logged-in session (verified
+    # against all 36 recorded season fixtures). The bodies below are trimmed
+    # to the episode table, so the chrome is added back here -- without it
+    # these would be testing the logged-out path instead of the parse path.
+    CHROME = '<section class="navigation"><a href="logout">Logout</a></section>'
+
+    def _run(self, season_html: str, chrome: str | None = None) -> dict:
+        # Resolved from the instance, not bound as a default: a default is
+        # evaluated once at class-body time, so subclasses overriding CHROME
+        # would silently still get this class's value.
+        chrome = self.CHROME if chrome is None else chrome
         scraper = BsToScraper()
         client = _FakeClient(
             {
                 self.SERIES_URL: self.SERIES_HTML,
-                self.SEASON_URL: season_html,
+                self.SEASON_URL: chrome + season_html,
             }
         )
         info = {"url": self.SERIES_URL, "link": "/serie/test-series", "title": "Test Series"}
@@ -285,6 +296,65 @@ class TestScrapeOneSeriesUnparseableSeason(unittest.TestCase):
         result = self._run(season_html)
         self.assertFalse(result.get("_error"))
         self.assertEqual(result["total_episodes"], 1)
+
+
+class TestSeasonPageLoggedOut(TestScrapeOneSeriesUnparseableSeason):
+    """A season page served logged out must fail the series, not record zeros.
+
+    Watched state comes from one CSS class the site only emits for an
+    authenticated request, so an anonymous season page parses perfectly and
+    reports every episode as unwatched. Storing that silently rewrites real
+    watch history, and nothing downstream can tell it from a series the user
+    genuinely has not watched.
+    """
+
+    SEASON_HTML = """
+    <table class="episodes"><tr>
+        <th class="episode-number-cell">1</th>
+        <td class="episode-title-ger">Pilot</td>
+    </tr></table>
+    """
+
+    def test_logged_out_season_errors_instead_of_storing_unwatched(self):
+        result = self._run(self.SEASON_HTML, chrome="")
+        self.assertTrue(result.get("_error"), f"expected an error result, got: {result}")
+        self.assertIn("not logged in", result.get("_error_reason", ""))
+
+    def test_logged_in_season_still_parses(self):
+        """The same page with the chrome present must be unaffected."""
+        result = self._run(self.SEASON_HTML)
+        self.assertFalse(result.get("_error"))
+        self.assertEqual(result["total_episodes"], 1)
+
+
+class TestSeasonPageWrongAccount(TestSeasonPageLoggedOut):
+    """The logout marker alone is not enough.
+
+    The site greets the account by name, so a page carrying a *different*
+    name is a page whose watched classes describe someone else's history.
+    """
+
+    SERIES_HTML = """
+    <html><body>
+    <section class="navigation"><div>Hallo<strong>testuser</strong>!</div>
+    <a href="logout">Logout</a></section>
+    <h2>Test Series</h2>
+    <div id="seasons"><ul><li><a href="/serie/test-series/1">1</a></li></ul></div>
+    </body></html>
+    """
+    CHROME = (
+        '<section class="navigation"><div>Hallo<strong>testuser</strong>!</div>'
+        '<a href="logout">Logout</a></section>'
+    )
+    OTHER_CHROME = (
+        '<section class="navigation"><div>Hallo<strong>someoneelse</strong>!</div>'
+        '<a href="logout">Logout</a></section>'
+    )
+
+    def test_wrong_account_season_errors(self):
+        result = self._run(self.SEASON_HTML, chrome=self.OTHER_CHROME)
+        self.assertTrue(result.get("_error"), f"expected an error result, got: {result}")
+        self.assertIn("not logged in", result.get("_error_reason", ""))
 
 
 # ==================== season counter drift (One Piece S23 regression) ====
