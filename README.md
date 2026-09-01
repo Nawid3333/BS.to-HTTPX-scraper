@@ -21,8 +21,11 @@ Uses **httpx** (no browser needed) with a multi-session architecture for fast, p
 - **Pause/resume** — create a `.pause_scraping` file to gracefully pause workers
 - **Report generation** — full statistics with ongoing series export
 - **Genre completion stats** — option 7 scrapes every series page for its genres into a separate
-  `data/genre_index.json`, then reports watched/total per genre. Self-contained: it never writes
-  `series_index.json`
+  `data/genre_index.json`, then reports watched/total per genre, exports a full JSON report, and lists
+  unwatched series by genre. Self-contained: it never writes `series_index.json`
+- **Smart genre picker** — used by option 7 and 8: type a few characters to filter the genre list,
+  press Tab to cycle matches, Enter to confirm, or type `0`/`back` to return. No scroll menu, no external
+  prompt toolkit required
 - **Data integrity checks** — detects episode count drops, season removals, watched-status corruption, and title changes before merging; offers to delete & rescrape critical series
 - **Atomic file writes** — all JSON writes use temp file + replace to prevent corruption
 - **Disk space check** — warns before scraping if free space is below 100 MB
@@ -77,12 +80,12 @@ NUM_WORKERS = 12  # Number of parallel httpx sessions
 
 All optional, with sensible defaults. Set them in `config/.env`.
 
-| Variable | Default | What it does |
-| --- | --- | --- |
-| `BS_MAX_WORKERS` | `12` | Concurrent scraping sessions. Measured, not guessed: throughput climbs steeply to 8, flattens by 12, and is indistinguishable from 12 up to 32 — past 12 only adds load. |
-| `BS_SEASON_CONCURRENCY` | `4` | Season pages fetched at once per series. Total requests in flight is workers x this. |
-| `BS_CHECKPOINT_EVERY` | `50` | Save resume state every N series. |
-| `BS_PROFILE` | unset | Set to `1` to print where a run's time actually went (network vs parse vs disk). |
+| Variable                | Default | What it does                                                                                                                                                             |
+| ----------------------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `BS_MAX_WORKERS`        | `12`    | Concurrent scraping sessions. Measured, not guessed: throughput climbs steeply to 8, flattens by 12, and is indistinguishable from 12 up to 32 — past 12 only adds load. |
+| `BS_SEASON_CONCURRENCY` | `4`     | Season pages fetched at once per series. Total requests in flight is workers x this.                                                                                     |
+| `BS_CHECKPOINT_EVERY`   | `50`    | Save resume state every N series.                                                                                                                                        |
+| `BS_PROFILE`            | unset   | Set to `1` to print where a run's time actually went (network vs parse vs disk).                                                                                         |
 
 ## Usage
 
@@ -92,18 +95,40 @@ python main.py
 
 ### Menu Options
 
-| #   | Option                              | Description                                                                |
-| --- | ----------------------------------- | -------------------------------------------------------------------------- |
-| 1   | **Scrape series from bs.to**        | Full scrape of all watched series. Choose single-session or multi-session. |
-| 2   | **Scrape only NEW series**          | Scrapes only series not yet in the index (faster).                         |
-| 3   | **Scrape unwatched series**         | Skips fully watched series; focuses on ongoing/partial.                    |
-| 4   | **Generate full report**            | Statistics report saved to JSON with ongoing series export.                |
-| 5   | **Single link / batch add**         | Add one series by pasting its bs.to URL, or batch-import from a text file. |
-| 6   | **Retry failed series**             | Bulk retry all series that failed in previous runs.                        |
-| 7   | **Watch Stats of Categories**       | Genre completion stats: scrape genres, show watched/total per genre, export. |
-| 0   | **Exit**                            | Clean exit.                                                                |
+| #   | Option                         | Description                                                                                           |
+| --- | ------------------------------ | ----------------------------------------------------------------------------------------------------- |
+| 1   | **Scrape series from bs.to**   | Full scrape of all watched series. Choose single-session or multi-session.                            |
+| 2   | **Scrape only NEW series**     | Scrapes only series not yet in the index (faster).                                                    |
+| 3   | **Scrape unwatched series**    | Skips fully watched series; focuses on ongoing/partial.                                               |
+| 4   | **Generate full report**       | Statistics report saved to JSON with ongoing series export.                                           |
+| 5   | **Single link / batch add**    | Add one series by pasting its bs.to URL, or batch-import from a text file.                            |
+| 6   | **Retry failed series**        | Bulk retry all series that failed in previous runs.                                                   |
+| 7   | **Watch Stats of Categories**  | Genre completion stats: scrape genres, show watched/total, export report, or list unwatched by genre. |
+| 8   | **Suggest something to watch** | Pick a genre (or all genres) and get up to 10 random unwatched series suggestions.                    |
+| 0   | **Exit**                       | Clean exit.                                                                                           |
 
 > **Pausing scraping:** there is no dedicated menu option. To gracefully pause workers, create a `.pause_scraping` file in the `data/` directory (see [Pause/resume](#pauseresume) below).
+
+### Option 7 — Watch Stats of Categories
+
+Opens its own sub-menu:
+
+1. **Scrape genres** — fetches every series page once, extracts all genres, and writes `data/genre_index.json`. Resumes if interrupted.
+2. **Show stats** — prints a watched/total table per genre, joined against the local series index, plus change notices since the last check.
+3. **Export genre report** — writes the same breakdown to `data/genre_report.json`.
+4. **Show unwatched by genre** — uses the interactive genre picker to filter series that still have unwatched episodes.
+
+The genre picker prints the full list once, then keeps a single prompt line:
+
+- **Type** to filter the list; matches are shown as `→ genre name`.
+- **Tab** cycles through matching genres.
+- **Enter** confirms the highlighted match.
+- **0** or **back** returns to the previous menu.
+- Non-interactive terminals fall back to plain text input.
+
+### Option 8 — Suggest something to watch
+
+Shows up to 10 random unwatched series. You can filter by a specific genre via the same picker, or choose **All genres / no filter** to pick across everything. The list is shuffled every time.
 
 ### Scraping Modes (Option 1)
 

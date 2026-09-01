@@ -18,6 +18,7 @@ from urllib.parse import urlparse
 
 from config.config import (
     SERIES_INDEX_FILE,
+    SITE_URL,
     SITE_URLS,
     VALID_SERIES_HOSTS,
 )
@@ -72,6 +73,51 @@ def _is_valid_series_url(url):
     return bool(_VALID_SERIES_PATH_RE.match(parsed.path))
 
 
+def _series_path_of(url):
+    """Return the series path of *url*, or None if it is not one at all.
+
+    Splits the two questions the old single check ran together: "is this a
+    series URL we are willing to store" and "is it on a host we currently
+    talk to". Dangerous schemes (javascript:, data:, file://) are still
+    rejected here -- only the host is left for _rehost_series_url to decide,
+    because a stale host is a fixable detail, not grounds to throw the entry
+    away.
+    """
+    if not url or not isinstance(url, str):
+        return None
+    if _VALID_SERIES_PATH_RE.match(url):
+        return url
+    try:
+        parsed = urlparse(url)
+    except Exception:
+        return None
+    if parsed.scheme not in ("http", "https"):
+        return None
+    return parsed.path if _VALID_SERIES_PATH_RE.match(parsed.path) else None
+
+
+def _rehost_series_url(url):
+    """Point a series URL at the configured host, keeping its path.
+
+    Index entries store whatever mirror was live when they were scraped.
+    Retiring that mirror from _SITE_URLS used to make every entry on it fail
+    validation; load_index dropped those entries, and the very next save
+    wrote the shortened index back to disk -- silently deleting the series
+    and every watched episode recorded against it. Since the whole index is
+    normally on one host, one config edit could take all of it.
+
+    The path is what identifies the series, so only the host is replaced.
+    Rewriting to the configured primary is enough: if the run is actually
+    using a different mirror, the merge stores the URL it really scraped.
+
+    Returns (url, changed).
+    """
+    path = _series_path_of(url)
+    if path is None or _is_valid_series_url(url):
+        return url, False
+    return f"{SITE_URL}{path}", True
+
+
 def _validate_series_entry(series, title=""):
     """Validate series entry structure. Returns True if valid."""
     if not isinstance(series, dict):
@@ -87,7 +133,7 @@ def _validate_series_entry(series, title=""):
             title,
         )
         return False
-    if not _is_valid_series_url(url):
+    if _series_path_of(url) is None:
         logger.warning(
             "Skipping series '%s' - invalid URL scheme/format: %s",
             title,
@@ -753,6 +799,16 @@ def show_vanished_series(
     return []
 
 
+def _report_order(title):
+    """Sort key for anything the change report lists, case-insensitively.
+
+    Falls back to str() so a non-string key in a hand-edited index sorts
+    rather than raising TypeError halfway through a scrape.
+    """
+    text = str(title)
+    return (text.lower(), text)
+
+
 def detect_changes(  # pylint: disable=too-many-branches
     old_data,
     new_data,
@@ -797,13 +853,18 @@ def detect_changes(  # pylint: disable=too-many-branches
         new_data = {s.get("title"): s for s in (new_data or []) if s and s.get("title")}
 
     # New series (in scraped data but not in existing index)
-    for title in new_titles - old_titles:
+    # Sorted, not raw set order. Python randomises string hashing per
+    # process, so the same scrape listed its changes in a different order
+    # every run -- and with the report paginated, the first page the user
+    # actually reads before pressing q was a random sample of the set
+    # rather than a stable, comparable list.
+    for title in sorted(new_titles - old_titles, key=_report_order):
         if title:
             changes["new_series"].append(title)
             _flag_new_series_watched_episodes(title, new_data.get(title, {}), changes)
 
     # Episode changes for existing series
-    for title in old_titles & new_titles:
+    for title in sorted(old_titles & new_titles, key=_report_order):
         _detect_episode_changes(
             title,
             old_data,
@@ -1942,10 +2003,27 @@ class IndexManager:
                 self.series_index = {}
 
             validated = {}
+            rehosted = 0
             for title, series in self.series_index.items():
-                if _validate_series_entry(series, str(title)):
-                    validated[title] = series
+                if not (_validate_series_entry(series, str(title))):
+                    continue
+                # An entry stored against a mirror that has since left _SITE_URLS
+                # keeps its data and gets its host rewritten. It used to be dropped
+                # here and then written out of the index by the next save.
+                moved = False
+                for field in ("url", "link"):
+                    value = series.get(field)
+                    if value:
+                        new_value, changed = _rehost_series_url(value)
+                        if changed:
+                            series[field] = new_value
+                            moved = True
+                rehosted += bool(moved)
+                validated[title] = series
             self.series_index = validated
+            if rehosted:
+                print(f"[INFO] Repointed {rehosted} index entry(s) to {SITE_URL} (stored host no longer configured).")
+                logger.warning("Repointed %d index entry(s) to %s", rehosted, SITE_URL)
 
         except Exception as exc:  # pylint: disable=broad-exception-caught
             print(f"[WARN] Error loading index: {exc}")
