@@ -343,12 +343,10 @@ class TestSeasonPageWrongAccount(TestSeasonPageLoggedOut):
     </body></html>
     """
     CHROME = (
-        '<section class="navigation"><div>Hallo<strong>testuser</strong>!</div>'
-        '<a href="logout">Logout</a></section>'
+        '<section class="navigation"><div>Hallo<strong>testuser</strong>!</div><a href="logout">Logout</a></section>'
     )
     OTHER_CHROME = (
-        '<section class="navigation"><div>Hallo<strong>someoneelse</strong>!</div>'
-        '<a href="logout">Logout</a></section>'
+        '<section class="navigation"><div>Hallo<strong>someoneelse</strong>!</div><a href="logout">Logout</a></section>'
     )
 
     def test_wrong_account_season_errors(self):
@@ -378,6 +376,8 @@ class TestDuplicateEpisodeNumbers(unittest.TestCase):
 
     def test_distinct_numbers_still_parse(self):
         eps = _parse_episodes(make_doc(self._table(1, 2)))
+        self.assertIsNotNone(eps, "a well-formed table must parse")
+        assert eps is not None  # narrows for the type checker
         self.assertEqual([e["number"] for e in eps], [1, 2])
 
 

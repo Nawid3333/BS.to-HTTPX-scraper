@@ -37,6 +37,7 @@ from config.config import (
     USERNAME,
 )
 from src.atomic_io import atomic_write_json
+from src.slug import slug_key, slug_keys
 
 logger = logging.getLogger(__name__)
 
@@ -1126,7 +1127,7 @@ class BsToScraper:  # pylint: disable=too-many-instance-attributes
 
     def get_ignored_slugs(self) -> set[str]:
         """Return set of slugs from the ignore list."""
-        return {self.get_series_slug_from_url(s.get("url", "")) for s in self.load_ignored_series()} - {"unknown"}
+        return slug_keys(self.get_series_slug_from_url(s.get("url", "")) for s in self.load_ignored_series())
 
     async def _revalidate_ignored_series(
         self,
@@ -1185,13 +1186,15 @@ class BsToScraper:  # pylint: disable=too-many-instance-attributes
         if not ignored:
             return
 
-        catalog_slugs = {self.get_series_slug_from_url(s.get("link", "")) for s in all_series} - {"unknown"}
+        catalog_slugs = slug_keys(self.get_series_slug_from_url(s.get("link", "")) for s in all_series)
 
         in_catalog = []
         disappeared = []
         for entry in ignored:
-            slug = self.get_series_slug_from_url(
-                entry.get("url", ""),
+            slug = slug_key(
+                self.get_series_slug_from_url(
+                    entry.get("url", ""),
+                )
             )
             title = entry.get("title", slug)
             if slug in catalog_slugs:
@@ -1223,7 +1226,7 @@ class BsToScraper:  # pylint: disable=too-many-instance-attributes
         Notification-only by default. Set quiet=True when the caller
         will present a vanished/new comparison table later.
         """
-        catalog_slugs = {self.get_series_slug_from_url(s.get("link", "")) for s in all_series} - {"unknown"}
+        catalog_slugs = slug_keys(self.get_series_slug_from_url(s.get("link", "")) for s in all_series)
 
         # Build slug→title map from the index
         index_map: dict[str, str] = {}
@@ -1232,10 +1235,12 @@ class BsToScraper:  # pylint: disable=too-many-instance-attributes
                 items = self._index_items()
                 for item in items:
                     url = item.get("url", "") or item.get("link", "")
-                    slug = self.get_series_slug_from_url(
-                        url,
+                    slug = slug_key(
+                        self.get_series_slug_from_url(
+                            url,
+                        )
                     )
-                    if slug != "unknown":
+                    if slug and slug != "unknown":
                         index_map[slug] = item.get(
                             "title",
                             slug,
@@ -1281,7 +1286,7 @@ class BsToScraper:  # pylint: disable=too-many-instance-attributes
 
     def _vanished_index_entries(self, all_series: list[dict]) -> list[tuple[str, str]]:
         """Return (title, url) for indexed series missing from the catalog."""
-        catalog_slugs = {self.get_series_slug_from_url(s.get("link", "")) for s in all_series} - {"unknown"}
+        catalog_slugs = slug_keys(self.get_series_slug_from_url(s.get("link", "")) for s in all_series)
         entries: list[tuple[str, str]] = []
         try:
             if not os.path.exists(SERIES_INDEX_FILE):
@@ -1296,7 +1301,7 @@ class BsToScraper:  # pylint: disable=too-many-instance-attributes
                 # prefers "link". Both are kept as fallbacks so an entry
                 # carrying only one of them still resolves.
                 slug_source = item.get("link", "") or item.get("url", "")
-                slug = self.get_series_slug_from_url(slug_source)
+                slug = slug_key(self.get_series_slug_from_url(slug_source))
                 if slug and slug != "unknown" and slug not in catalog_slugs:
                     entries.append((item.get("title", slug), item.get("url", "") or slug_source))
         except Exception:  # pylint: disable=broad-exception-caught
@@ -1437,10 +1442,11 @@ class BsToScraper:  # pylint: disable=too-many-instance-attributes
                 for item in items:
                     url = item.get("url", "") or item.get("link", "")
                     if url:
-                        existing.add(self.get_series_slug_from_url(url))
+                        existing.add(slug_key(self.get_series_slug_from_url(url)))
         except Exception:  # pylint: disable=broad-exception-caught
             pass
         existing.discard("unknown")
+        existing.discard(None)
         return existing
 
     # -- Async internals ---------------------------------------------
@@ -1535,9 +1541,12 @@ class BsToScraper:  # pylint: disable=too-many-instance-attributes
             if not raw or raw.lower().strip() in _UTILITY_PAGES:
                 continue
             slug = href.split("/")[1] if "/" in href else href
-            if not slug or slug in seen_slugs:
+            # Two spellings of one slug (case, percent-encoding) are one
+            # series; counting both would inflate the catalogue total that the
+            # index is cross-checked against.
+            if not slug or slug_key(slug) in seen_slugs:
                 continue
-            seen_slugs.add(slug)
+            seen_slugs.add(slug_key(slug))
             entry = {
                 "title": raw,
                 "link": f"/{href}",
@@ -2070,15 +2079,15 @@ class BsToScraper:  # pylint: disable=too-many-instance-attributes
             slug_map: dict[str, float] = {}
             for item in items:
                 url = item.get("url", "") or item.get("link", "")
-                slug = self.get_series_slug_from_url(url)
+                slug = slug_key(self.get_series_slug_from_url(url))
                 avg = item.get("avg_scrape_seconds")
-                if slug != "unknown" and isinstance(avg, (int, float)) and avg > 0:
+                if slug and slug != "unknown" and isinstance(avg, (int, float)) and avg > 0:
                     slug_map[slug] = float(avg)
 
             total = 0.0
             matched = 0
             for s in series_list:
-                slug = self.get_series_slug_from_url(s.get("link", ""))
+                slug = slug_key(self.get_series_slug_from_url(s.get("link", "")))
                 if slug in slug_map:
                     total += slug_map[slug]
                     matched += 1
@@ -2275,15 +2284,28 @@ class BsToScraper:  # pylint: disable=too-many-instance-attributes
         # Single-series runs have no partial resume state to preserve.
         self.clear_checkpoint()
 
-    async def _run_url_list(self, tmp, url_list):
-        """Scrape a batch of series from a URL list."""
-        if self._checkpoint_mode is None:
-            self._checkpoint_mode = "batch"
+    def _series_list_from_urls(self, url_list):
+        """Turn a batch of URLs into one entry per series, in file order.
+
+        A batch file names series, not pages: "/serie/one-piece" and
+        "/serie/one-piece/staffel-23" are two lines for one series, and
+        normalize_to_series_url turns both into the same URL. Scraping it
+        twice fetches it twice, prints it twice in the progress output, and
+        merges it twice, so duplicates are collapsed here -- the first point
+        at which the two spellings look alike. The first line wins, so the
+        file's order is preserved.
+        """
         series_list = []
+        seen_keys: set[str] = set()
         for u in url_list:
             main_url = self.normalize_to_series_url(u)
             m = _SERIE_PATH_RE.search(main_url)
             link = m.group(1) if m else main_url
+            slug = slug_key(self.get_series_slug_from_url(link))
+            key = slug if slug and slug != "unknown" else (slug_key(main_url) or main_url)
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
             series_list.append(
                 {
                     "title": main_url.split("/")[-1],
@@ -2292,13 +2314,23 @@ class BsToScraper:  # pylint: disable=too-many-instance-attributes
                     "scrape_url": main_url,
                 }
             )
+        return series_list
+
+    async def _run_url_list(self, tmp, url_list):
+        """Scrape a batch of series from a URL list."""
+        if self._checkpoint_mode is None:
+            self._checkpoint_mode = "batch"
+        series_list = self._series_list_from_urls(url_list)
+        duplicates = len(url_list) - len(series_list)
+        if duplicates:
+            print(f"  → {duplicates} duplicate URL(s) collapsed; scraping {len(series_list)} series.")
         # tmp is closed by _async_run's finally block.
         n = NUM_WORKERS if self._use_parallel and len(series_list) > 1 else 1
         await self._scrape_list(
             series_list,
             num_workers=n,
         )
-        print(f"  Successfully scraped: {len(self.series_data)}/{len(url_list)} series")
+        print(f"  Successfully scraped: {len(self.series_data)}/{len(series_list)} series")
 
     async def _run_retry(self, tmp):
         """Retry previously failed series."""
@@ -2327,12 +2359,16 @@ class BsToScraper:  # pylint: disable=too-many-instance-attributes
             s
             for s in all_series
             if (
-                self.get_series_slug_from_url(
-                    s.get("link", ""),
+                slug_key(
+                    self.get_series_slug_from_url(
+                        s.get("link", ""),
+                    )
                 )
                 not in existing_slugs
-                and self.get_series_slug_from_url(
-                    s.get("link", ""),
+                and slug_key(
+                    self.get_series_slug_from_url(
+                        s.get("link", ""),
+                    )
                 )
                 not in ignored_slugs
             )
@@ -2387,12 +2423,16 @@ class BsToScraper:  # pylint: disable=too-many-instance-attributes
             s
             for s in all_series
             if (
-                self.get_series_slug_from_url(
-                    s.get("link", ""),
+                slug_key(
+                    self.get_series_slug_from_url(
+                        s.get("link", ""),
+                    )
                 )
                 not in existing_slugs
-                and self.get_series_slug_from_url(
-                    s.get("link", ""),
+                and slug_key(
+                    self.get_series_slug_from_url(
+                        s.get("link", ""),
+                    )
                 )
                 not in ignored_slugs
             )
@@ -2426,8 +2466,10 @@ class BsToScraper:  # pylint: disable=too-many-instance-attributes
             all_series = [
                 s
                 for s in all_series
-                if self.get_series_slug_from_url(
-                    s.get("link", ""),
+                if slug_key(
+                    self.get_series_slug_from_url(
+                        s.get("link", ""),
+                    )
                 )
                 not in ignored_slugs
             ]
@@ -2509,11 +2551,11 @@ class BsToScraper:  # pylint: disable=too-many-instance-attributes
                 series = await self._get_all_series(client)
             finally:
                 await client.aclose()
-            slugs = set()
-            for s in series:
-                slug = self.get_series_slug_from_url(s.get("link", ""))
-                if slug and slug != "unknown":
-                    slugs.add(slug)
+            # slug_keys normalises what the site printed, and the index side
+            # of this comparison normalises the same way. Comparing raw
+            # strings makes every mixed-case slug in the index look vanished
+            # and its own site entry look new, on every host, forever.
+            slugs = slug_keys(self.get_series_slug_from_url(item.get("link", "")) for item in series)
             return len(series), slugs
         except Exception as exc:
             logger.error(

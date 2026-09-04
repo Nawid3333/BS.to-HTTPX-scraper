@@ -26,6 +26,7 @@ from config.config import (
 )
 from src.atomic_io import atomic_write_json, create_file_backup
 from src.scraper import BsToScraper
+from src.slug import slug_key
 
 logger = logging.getLogger(__name__)
 
@@ -315,10 +316,15 @@ def group_episodes_by_season(
 
 
 def _extract_slug(entry):
-    """Extract series slug from an index entry's link or url.
+    """Return the comparison key for an index entry's slug, or None.
 
-    Delegates to BsToScraper.get_series_slug_from_url.
-    Returns None if extraction fails.
+    Extraction is BsToScraper.get_series_slug_from_url; the result is then
+    normalised by :func:`slug_key`, because every caller of this function is
+    asking "is this the same series?" -- against the catalogue, the mismatch
+    report, or another index entry. The site does not spell a slug the same
+    way in every list it prints, so a raw string comparison here reports a
+    series as both vanished and new at once. Use the stored ``url``/``link``
+    field, not this key, when building a request.
     """
     if not isinstance(entry, dict):
         return None
@@ -326,7 +332,7 @@ def _extract_slug(entry):
         value = entry.get(field, "")
         if not value or not isinstance(value, str):
             continue
-        slug = BsToScraper.get_series_slug_from_url(value)
+        slug = slug_key(BsToScraper.get_series_slug_from_url(value))
         if slug and slug != "unknown":
             return slug
     return None
@@ -1003,7 +1009,16 @@ def _prompt_vanished_table(vanished_entries, new_dict, old_data, scraper=None):
                 f'  [{i}/{len(rows)}] Action for "{v_title}"? '
                 f"(y=delete n=keep k=keep d=delete r=rescrape o=open a <action>=all s=skip all) [n]: "
             )
-            choice = input(prompt).strip().lower() or "n"
+            try:
+                choice = input(prompt).strip().lower() or "n"
+            except EOFError:
+                # No one is there to answer -- a piped or redirected run. The
+                # loop below re-prompts on anything it does not recognise, so
+                # without this an unattended run spins forever on a closed
+                # stdin. Keeping every entry is the reversible answer.
+                print("  -> No input available; keeping all remaining entries.")
+                skip_all = True
+                break
 
             if choice == "s":
                 skip_all = True
@@ -1144,7 +1159,7 @@ def show_vanished_series(
             vanished and candidate URLs before matching.
 
     Returns:
-        list of vanished series titles that were kept
+        list of kept (title, reason) tuples, as the sibling scrapers return
     """
     if scrape_scope not in ("all", "new_only"):
         return []
@@ -1174,15 +1189,23 @@ def show_vanished_series(
         else:
             candidate_entries = [s for s in new_data.values() if s.get("title") and s.get("title") not in old_titles]
         if candidate_entries:
-            ask = (
-                input(
-                    f"\n{len(vanished)} vanished series found; "
-                    f"{len(candidate_entries)} new series could be renames. "
-                    "Re-scrape all candidate URLs for verification? (y/n): "
+            try:
+                ask = (
+                    input(
+                        f"\n{len(vanished)} vanished series found; "
+                        f"{len(candidate_entries)} new series could be renames. "
+                        "Re-scrape all candidate URLs for verification? (y/n): "
+                    )
+                    .strip()
+                    .lower()
                 )
-                .strip()
-                .lower()
-            )
+            except EOFError:
+                # Piped or redirected run. Skipping the live re-verification costs
+                # accuracy, not data -- the decision table below has its own
+                # closed-stdin guard and keeps every entry. Letting this raise
+                # would instead kill the run just before the results are saved.
+                print("  -> No input available; skipping live re-verification.")
+                ask = "n"
             if ask == "y":
                 _, verified_new_data = asyncio.run(scraper.verify_vanished_and_candidates(vanished, candidate_entries))
                 new_data = verified_new_data
@@ -1232,13 +1255,13 @@ def show_vanished_series(
                     "Use the interactive prompts below to delete old entries."
                 )
             else:
-                for i, (title, url) in enumerate(vanished, 1):
-                    print(f"  {i}. {title}")
+                for i, (title, reason, url) in enumerate(vanished, 1):
+                    print(f"  {i}. {title}  ({reason})")
                     print(f"      old: {url}")
                 print(separator)
         else:
-            for i, (title, url) in enumerate(vanished, 1):
-                print(f"  {i}. {title}")
+            for i, (title, reason, url) in enumerate(vanished, 1):
+                print(f"  {i}. {title}  ({reason})")
                 print(f"      old: {url}")
             print(separator)
 
@@ -1260,8 +1283,8 @@ def show_vanished_series(
             len(to_delete),
         )
 
-        kept = [title for title, _ in vanished if title not in set(to_delete)]
-        return kept
+        delete_set = set(to_delete)
+        return [(title, reason) for title, reason, _ in vanished if title not in delete_set]
 
     return []
 
