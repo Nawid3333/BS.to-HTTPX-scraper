@@ -21,6 +21,8 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+import lxml.html  # noqa: E402
+
 from src import genre_stats  # noqa: E402
 from src.genre_stats import (  # noqa: E402
     build_snapshot,
@@ -46,7 +48,7 @@ def keys_of(doc):
     return [key for key, _ in extract_genres(doc)]
 
 
-def infos_page(genre_html: str, *, extra: str = ""):
+def infos_page(genre_html: str, *, extra: str = "") -> lxml.html.HtmlElement:
     """Build a div.infos block shaped like a real bs.to series page.
 
     Always includes the same sibling blocks (Produktionsjahre, Hauptdarsteller,
@@ -66,7 +68,9 @@ def infos_page(genre_html: str, *, extra: str = ""):
     </div>
     </body></html>
     """
-    return make_doc(html)
+    doc = make_doc(html)
+    assert doc is not None
+    return doc
 
 
 def series_entry(total, watched, slug):

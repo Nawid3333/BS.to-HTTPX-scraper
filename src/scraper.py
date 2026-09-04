@@ -18,6 +18,7 @@ import signal
 import sys
 import threading
 import time
+from typing import Any, Protocol
 from urllib.parse import urljoin, urlparse
 
 import httpx
@@ -52,7 +53,7 @@ logger = logging.getLogger(__name__)
 # with it.
 
 
-def make_doc(html: str):
+def make_doc(html: str) -> lxml.html.HtmlElement | None:
     """Parse a page into an lxml tree, or None if the body is not markup.
 
     Every parser in this module goes through here: building a
@@ -890,6 +891,19 @@ class ScrapingPausedError(Exception):
     """Raised when a pause file is detected during scraping."""
 
 
+class _AsyncGetClient(Protocol):
+    """Subset of httpx.AsyncClient that only needs GET."""
+
+    async def get(self, *args: Any, **kwargs: Any) -> httpx.Response: ...
+
+
+class _AsyncClient(_AsyncGetClient, Protocol):
+    """Subset of httpx.AsyncClient used by login and account helpers."""
+
+    async def post(self, *args: Any, **kwargs: Any) -> httpx.Response: ...
+    async def aclose(self) -> None: ...
+
+
 # -- BsToScraper (httpx) ---------------------------------------------
 
 
@@ -1168,7 +1182,7 @@ class BsToScraper:  # pylint: disable=too-many-instance-attributes
 
     async def _revalidate_ignored_series(
         self,
-        client: httpx.AsyncClient,
+        client: _AsyncClient,
     ):
         """Re-check ignored series to see if still empty/404.
 
@@ -1490,7 +1504,7 @@ class BsToScraper:  # pylint: disable=too-many-instance-attributes
 
     async def _login_client(
         self,
-        client: httpx.AsyncClient,
+        client: _AsyncClient,
         verify: bool = True,
     ) -> None:
         """Log in an existing httpx client to bs.to.
@@ -1558,7 +1572,7 @@ class BsToScraper:  # pylint: disable=too-many-instance-attributes
 
     async def _get_all_series(
         self,
-        client: httpx.AsyncClient,
+        client: _AsyncGetClient,
     ) -> list[dict]:
         """Fetch the full series catalogue from bs.to."""
         series_list_url = _series_list_url(self.site_url)
@@ -1660,7 +1674,7 @@ class BsToScraper:  # pylint: disable=too-many-instance-attributes
 
     async def _scrape_one_series(
         self,
-        client: httpx.AsyncClient,
+        client: _AsyncGetClient,
         info: dict,
     ) -> dict:  # pylint: disable=too-many-locals,too-many-return-statements
         """Scrape a single series and return its data."""
@@ -2709,7 +2723,7 @@ class BsToScraper:  # pylint: disable=too-many-instance-attributes
 
     async def verify_series_url(
         self,
-        client: httpx.AsyncClient,
+        client: _AsyncGetClient,
         url: str,
     ) -> dict:
         """Fetch a series URL and return current title/availability info.

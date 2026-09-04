@@ -39,7 +39,7 @@ from src.scraper import (  # noqa: E402
 
 def tree_repr(doc) -> str:
     """Serialise a tree so a test can prove a reader did not edit it."""
-    return lxml.html.tostring(doc, encoding="unicode")
+    return lxml.html.tostring(doc, encoding="unicode")  # type: ignore[return-value]
 
 
 class TempFileCase(unittest.TestCase):

@@ -2497,7 +2497,7 @@ def confirm_and_save_changes(new_data, description="data", active_site_url=None,
         if index_manager is None:
             index_manager = IndexManager(SERIES_INDEX_FILE)
         series_list = [_order_series_entry(series) for series in merged.values()]
-        index_manager.series_index = {s.get("title"): s for s in series_list if s.get("title")}
+        index_manager.series_index = {s["title"]: s for s in series_list if s.get("title")}
         index_manager.save_index()
         print(f"\u2713 Saved {len(series_list)} series to index")
         logger.info(
@@ -2514,6 +2514,8 @@ def confirm_and_save_changes(new_data, description="data", active_site_url=None,
 
 class IndexManager:
     """Manages the local series index file."""
+
+    series_index: dict[str, dict]
 
     def __init__(self, index_file):
         self.index_file = index_file

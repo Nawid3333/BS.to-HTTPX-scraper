@@ -23,11 +23,8 @@ import sys
 import time
 from collections import Counter
 from datetime import datetime
-from typing import TYPE_CHECKING
+from typing import Protocol
 from urllib.parse import urlparse
-
-if TYPE_CHECKING:
-    from src.index_manager import IndexManager
 
 from config.config import (
     DATA_DIR,
@@ -43,10 +40,10 @@ from config.config import (
     ensure_env_file,
 )
 from src import (
-    genre_stats,  # noqa: E402
+    genre_stats,
     term,
 )
-from src.index_manager import (  # noqa: E402
+from src.index_manager import (
     IndexManager,
     _extract_slug,
     confirm_and_save_changes,
@@ -54,13 +51,20 @@ from src.index_manager import (  # noqa: E402
     remove_series_from_index,
     show_vanished_series,
 )
-from src.scraper import (  # noqa: E402
+from src.scraper import (
     BsToScraper,
     ScrapingPausedError,
 )
-from src.slug import slug_keys  # noqa: E402
+from src.slug import slug_keys
 from src.term import cinput as input
 from src.term import cprint as print
+
+
+class _IndexLike(Protocol):
+    """Minimal index manager surface used by suggestion helpers."""
+
+    series_index: dict[str, dict]
+
 
 # Global active site URL (set by domain probing)
 ACTIVE_SITE_URL: str | None = None
@@ -75,7 +79,7 @@ _file_handler = logging.handlers.RotatingFileHandler(
 )
 _file_handler.setFormatter(term.PlainFormatter(_LOG_FORMAT))
 
-_console_handler = logging.StreamHandler()
+_console_handler = logging.StreamHandler(sys.stdout)
 _console_handler.setFormatter(term.ColorFormatter(_LOG_FORMAT))
 
 logging.basicConfig(
@@ -836,7 +840,7 @@ def _prompt_genre_choice(choices: dict[str, str], *, allow_back: bool = True) ->
         print("✗ No genre matched. Please try again.")
 
 
-def _suggest_something_to_watch(idx_mgr: IndexManager | None = None):
+def _suggest_something_to_watch(idx_mgr: _IndexLike | None = None):
     """Suggest unwatched series from the index, optionally filtered by genre.
 
     Loads the genre index and presents a list of unwatched series. The user
