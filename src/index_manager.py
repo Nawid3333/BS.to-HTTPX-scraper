@@ -1594,6 +1594,17 @@ def _read_index_json(index_file):
         return None
 
 
+def _has_usable_entries(data):
+    """True when `data` holds at least one dict carrying a title.
+
+    A backup can be readable JSON and still be worthless -- truncated to an
+    empty list, or holding only elements the loader will skip. Telling those
+    apart from a real restore is what lets the search move on to .bak2.
+    """
+    items = data.values() if isinstance(data, dict) else data
+    return any(isinstance(item, dict) and item.get("title") for item in items)
+
+
 def _try_restore_backup_data(index_file):
     """Return index data from the newest readable backup, or None.
 
@@ -1610,8 +1621,12 @@ def _try_restore_backup_data(index_file):
         try:
             with open(backup_path, encoding="utf-8") as f:
                 data = json.load(f)
-            if isinstance(data, (list, dict)):
+            if isinstance(data, (list, dict)) and _has_usable_entries(data):
                 return data
+            # A readable backup holding nothing usable is not a restore.
+            # Returning it anyway ended the search here, so a truncated .bak1
+            # hid a perfectly good .bak2 behind it.
+            logger.warning("Backup %s held no usable entries; trying the next", backup_path)
         except (json.JSONDecodeError, OSError) as exc:
             logger.warning("Backup %s also unreadable: %s", backup_path, exc)
     return None
@@ -2512,16 +2527,20 @@ class IndexManager:
             logger.warning("Index unreadable at %s; restored from backup", self.index_file)
         try:
             if isinstance(data, list):
-                self.series_index = {item.get("title"): item for item in data if item.get("title")}
+                # isinstance first: .get() on a non-dict raises AttributeError,
+                # and the broad handler below turns that into an empty index --
+                # one stray element used to discard every good entry with it.
+                # Backup data arrives here too, so this covers the restore path.
+                self.series_index = {
+                    title: item for item in data if isinstance(item, dict) and (title := item.get("title"))
+                }
             elif isinstance(data, dict):
                 first_item = next(iter(data.values()), None)
                 if first_item and isinstance(first_item, dict) and first_item.get("title"):
                     self.series_index = data
                 else:
                     self.series_index = {
-                        item.get("title"): item
-                        for item in data.values()
-                        if isinstance(item, dict) and item.get("title")
+                        title: item for item in data.values() if isinstance(item, dict) and (title := item.get("title"))
                     }
             else:
                 self.series_index = {}
