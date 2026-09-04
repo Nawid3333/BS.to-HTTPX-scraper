@@ -126,7 +126,7 @@ _XP_TITLE_ENG = f".//*[{_hc('episode-title-eng')}]"
 _XP_LANGUAGE_DROPDOWN = f".//*[{_hc('series-language')}]"
 _XP_LANGUAGE_OPTIONS = f".//li[{_hc('option')}]"
 # Same marker _is_logged_in checks for, as XPath so a season page can be
-# verified from the lxml tree parse_season_html already builds.
+# verified from the lxml tree _parse_season_doc already builds.
 _XP_LOGGED_IN = ".//a[@href='logout']"
 # Second, independent login signal: the site greets the account by name in
 # the navigation of every page it serves to a logged-in session. Checked
@@ -235,15 +235,38 @@ def parse_season_html(html: str):
     Not narrowed to the <table> subtree either. _parse_episodes accepts
     `.episode-table` on *any* element and carries generic fallbacks precisely
     so a site redesign does not break it; restricting the parse to a tag name
-    throws that resilience away, and the language dropdown lives outside the
-    table anyway.
+    throws that resilience away.
+
+    Returns episodes alone, as the sibling repos do. bs.to also publishes
+    season-level languages, but they are read from the same tree by
+    _extract_season_languages at the one call site that stores them, so this
+    entry point stays the same shape in all three.
     """
-    doc = make_doc(html)
-    return _parse_episodes(doc), _extract_season_languages(doc)
+    return _parse_episodes(make_doc(html))
 
 
-def parse_season_page(html: str, account_name: str | None = None):
-    """Read a season page once, returning (logged_in, episodes, languages).
+def _parse_season_doc(doc, account_name: str | None = None) -> tuple[bool, list[dict] | None]:
+    """The body of parse_season_page, over a tree the caller already built.
+
+    Split out so _scrape_one_series can build the tree once and read the
+    episodes, the login marker and the season languages from it. Parsing the
+    page a second time just to reach the language dropdown would undo the
+    switch to lxml that make_doc exists for.
+    """
+    if doc is None:
+        return False, None
+    logged_in = bool(doc.xpath(_XP_LOGGED_IN))
+    if logged_in and account_name:
+        # Both signals must agree. Getting this wrong in the safe direction
+        # costs one series a retry; getting it wrong the other way writes a
+        # page's worth of false "unwatched" into the index.
+        found = _account_name_from_doc(doc)
+        logged_in = found is not None and found.casefold() == account_name.casefold()
+    return logged_in, _parse_episodes(doc)
+
+
+def parse_season_page(html: str, account_name: str | None = None) -> tuple[bool, list[dict] | None]:
+    """Read a season page once, returning (logged_in, episodes).
 
     Every episode's watched flag comes from a single CSS class that the site
     only emits for an authenticated request, so a season page served logged
@@ -253,21 +276,16 @@ def parse_season_page(html: str, account_name: str | None = None):
     marker before its watch data is trusted -- the series page having been
     logged in a moment earlier does not vouch for this one.
 
-    A body that is not markup at all reports logged_in False with episodes
-    None; callers test the episodes for None first, so it surfaces as the
-    parse failure it is rather than as a session expiry.
+    A body that is not markup at all reports (False, None); callers test the
+    episodes for None first, so it surfaces as the parse failure it is
+    rather than as a session expiry.
+
+    Season languages are bs.to-only and are not returned here: keeping this
+    signature identical to the aniworld.to and s.to versions is what lets a
+    fix to any one of them port across unchanged. _extract_season_languages
+    reads them from the same tree where they are actually stored.
     """
-    doc = make_doc(html)
-    if doc is None:
-        return False, None, {}
-    logged_in = bool(doc.xpath(_XP_LOGGED_IN))
-    if logged_in and account_name:
-        # Both signals must agree. Getting this wrong in the safe direction
-        # costs one series a retry; getting it wrong the other way writes a
-        # page's worth of false "unwatched" into the index.
-        found = _account_name_from_doc(doc)
-        logged_in = found is not None and found.casefold() == account_name.casefold()
-    return logged_in, _parse_episodes(doc), _extract_season_languages(doc)
+    return _parse_season_doc(make_doc(html), account_name)
 
 
 class PhaseProfiler:
@@ -582,7 +600,7 @@ def _parse_episodes(doc) -> list[dict] | None:
     """Parse episode rows from a season page.
 
     Takes an lxml tree from make_doc rather than a soup: the tree build was
-    most of the cost, and parse_season_html hands the same tree to
+    most of the cost, and _scrape_one_series hands the same tree to
     _extract_season_languages, so the page is parsed once. Output is
     unchanged: verified against the recorded output of the BeautifulSoup
     version over 557 pages and 9,606 episodes, including the fallback
@@ -1708,7 +1726,12 @@ class BsToScraper:  # pylint: disable=too-many-instance-attributes
                     f"season {label} fetch failed: {page}",
                 )
             with self._profiler.phase("parse"):
-                logged_in, episodes, season_languages = parse_season_page(page, self._account_name)
+                # One tree per season page, read three ways: the login
+                # marker, the episode rows, and bs.to's season-level
+                # language dropdown. parse_season_page would rebuild it.
+                doc = make_doc(page)
+                logged_in, episodes = _parse_season_doc(doc, self._account_name)
+                season_languages = _extract_season_languages(doc)
             if episodes is not None and not logged_in:
                 # Belt and braces: _any_season_logged_out already screened the
                 # batch, so reaching here means the page changed between reads.
@@ -1796,7 +1819,7 @@ class BsToScraper:  # pylint: disable=too-many-instance-attributes
         for page in season_pages:
             if isinstance(page, BaseException):
                 continue
-            logged_in, episodes, _ = parse_season_page(page, self._account_name)
+            logged_in, episodes = parse_season_page(page, self._account_name)
             if episodes is not None and not logged_in:
                 return True
         return False
