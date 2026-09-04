@@ -42,7 +42,10 @@ from config.config import (
     configure_console,
     ensure_env_file,
 )
-from src import genre_stats  # noqa: E402
+from src import (
+    genre_stats,  # noqa: E402
+    term,
+)
 from src.index_manager import (  # noqa: E402
     IndexManager,
     _extract_slug,
@@ -56,22 +59,31 @@ from src.scraper import (  # noqa: E402
     ScrapingPausedError,
 )
 from src.slug import slug_keys  # noqa: E402
+from src.term import cinput as input
+from src.term import cprint as print
 
 # Global active site URL (set by domain probing)
 ACTIVE_SITE_URL: str | None = None
 
 # Logging
+_LOG_FORMAT = "%(asctime)s - %(levelname)s - %(message)s"
+
+# Only the console handler is coloured. The rotating file keeps the plain
+# formatter: escape codes in logs/*.log are unreadable and break grep.
+_file_handler = logging.handlers.RotatingFileHandler(
+    LOG_FILE, maxBytes=10 * 1024 * 1024, backupCount=5, encoding="utf-8"
+)
+_file_handler.setFormatter(term.PlainFormatter(_LOG_FORMAT))
+
+_console_handler = logging.StreamHandler()
+_console_handler.setFormatter(term.ColorFormatter(_LOG_FORMAT))
+
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s",
+    format=_LOG_FORMAT,
     handlers=[
-        logging.handlers.RotatingFileHandler(
-            LOG_FILE,
-            maxBytes=10 * 1024 * 1024,
-            backupCount=5,
-            encoding="utf-8",
-        ),
-        logging.StreamHandler(),
+        _file_handler,
+        _console_handler,
     ],
 )
 logging.getLogger("urllib3").setLevel(logging.ERROR)
@@ -281,7 +293,11 @@ def _remove_duplicate_index_entries(idx_mgr, index_duplicates):
             print(f"         {seasons} season(s), {watched}/{total} watched")
             print(f"         {series.get('url') or series.get('link', '')}")
 
-        choice = input(f"      keep which? (1-{len(entries)}, s=skip, a=abort): ").strip().lower()
+        choice = (
+            input("      " + term.danger("keep which?") + term.dim(f" (1-{len(entries)}, s=skip, a=abort): "))
+            .strip()
+            .lower()
+        )
         if choice == "a":
             print("      aborted - nothing further changed.")
             break
@@ -485,7 +501,7 @@ def _probe_sites_before_scrape(scraper, idx_mgr=None):
     suffix = "" if ok_hosts else " (default)"
     print(f"→ Active host: {scraper.site_url}{suffix}")
     if scraper.site_url.startswith("http://"):
-        print("  ⚠ WARNING: Active host is unencrypted (HTTP) — credentials sent in cleartext.")
+        print("  " + term.danger("⚠ WARNING: Active host is unencrypted (HTTP) — credentials sent in cleartext."))
 
     if len(ok_hosts) >= 2:
         counts = [host_counts.get(host) for host in ok_hosts if host_counts.get(host) is not None]
@@ -899,23 +915,37 @@ def _suggest_something_to_watch(idx_mgr: IndexManager | None = None):
         total = series.get("total_episodes", 0)
         sub = series.get("subscribed")
         wl = series.get("watchlist")
-        sub_mark = "✓" if sub else "✗" if sub is not None else "?"
-        wl_mark = "✓" if wl else "✗" if wl is not None else "?"
+        # Padded before colouring: an escape code inside a width specifier
+        # counts as visible characters and collapses the column.
+        sub_mark = _status_mark(sub)
+        wl_mark = _status_mark(wl)
         genres = series_genres.get(title, [])
         genre_str = ", ".join(genre_labels.get(g, g) for g in genres) if genres else "\u2014"
         row = (
             f"    {i:<{idx_w}}  {title:<{title_w}}  {watched}/{total:<{total_w - 2}}"
-            f"  {sub_mark:<3}  {wl_mark:<3}  {genre_str:<{genre_w}}  {link}"
+            f"  {sub_mark}  {wl_mark}  {genre_str:<{genre_w}}  {link}"
         )
         print(row)
     print("\n  Copy a link and open it in your browser to check it out.")
 
 
+def _status_mark(value, width: int = 3) -> str:
+    """A padded ✓/✗/? for the report columns.
+
+    Padding happens first and colour second, so the column keeps its width:
+    an f-string width specifier counts escape codes as visible characters.
+    """
+    if value is None:
+        return f"{'?':<{width}}"
+    glyph = f"{'✓' if value else '✗':<{width}}"
+    return term.ok(glyph) if value else term.err(glyph)
+
+
 def print_header():
     """Print the application header banner."""
-    print("=" * 60)
-    print("  BS.TO SERIES SCRAPER & INDEX MANAGER  (httpx)")
-    print("=" * 60 + "\n")
+    print(term.style("=" * 60, term._T.CYAN))
+    print(term.step("  BS.TO SERIES SCRAPER & INDEX MANAGER  (httpx)"))
+    print(term.style("=" * 60, term._T.CYAN) + "\n")
 
 
 def print_scraped_series_status(changes=None):
@@ -963,7 +993,7 @@ def print_scraped_series_status(changes=None):
 def validate_credentials():
     """Check that username and password are configured."""
     if not USERNAME or not PASSWORD:
-        print("\u2717 ERROR: Credentials not configured!")
+        print(term.danger("\u2717 ERROR: Credentials not configured!"))
         print("\nPlease follow these steps:")
         print("1. Copy '.env.example' to '.env'")
         print("2. Add your bs.to username and password")
@@ -978,9 +1008,9 @@ def check_disk_space(min_mb=100):
         stat = shutil.disk_usage(DATA_DIR)
         available_mb = stat.free / (1024 * 1024)
         if available_mb < min_mb:
-            print("\n✗ WARNING: Low disk space!")
-            print(f"  Available: {available_mb:.1f} MB (minimum needed: {min_mb} MB)")
-            print("  Please free up disk space before scraping.\n")
+            print("\n" + term.danger("✗ WARNING: Low disk space!"))
+            print(term.err(f"  Available: {available_mb:.1f} MB (minimum needed: {min_mb} MB)"))
+            print(term.err("  Please free up disk space before scraping.") + "\n")
             return False
         return True
     except Exception as e:
@@ -990,7 +1020,7 @@ def check_disk_space(min_mb=100):
 
 def show_menu():
     """Display the interactive main menu."""
-    print("\nOptions:")
+    print("\n" + term.step("Options:"))
     print("  1. Scrape all series")
     print("  2. Scrape only NEW series")
     print("  3. Scrape unwatched series")
@@ -1022,7 +1052,7 @@ def _check_checkpoint(expected_mode=None):
         choice = input("Resume from checkpoint? (y/n): ").strip().lower()
         if choice == "y":
             return {"ok": True, "resume": True}
-        discard = input("Discard old checkpoint and start fresh? (y/n): ").strip().lower()
+        discard = input(term.danger("Discard old checkpoint and start fresh?") + term.dim(" (y/n): ")).strip().lower()
         if discard == "y":
             with contextlib.suppress(OSError):
                 os.remove(cp_file)
@@ -1032,7 +1062,7 @@ def _check_checkpoint(expected_mode=None):
     expected_label = _MODE_LABELS.get(expected_mode, expected_mode)
     print(f'\n\u26a0 A checkpoint exists from a different mode: "{saved_label}"')
     print(f'   You are about to run: "{expected_label}"\n')
-    discard = input("Discard the old checkpoint and continue? (y/n): ").strip().lower()
+    discard = input(term.danger("Discard the old checkpoint and continue?") + term.dim(" (y/n): ")).strip().lower()
     if discard == "y":
         with contextlib.suppress(OSError):
             os.remove(cp_file)

@@ -34,7 +34,15 @@ from src.index_manager import (
 from src.index_manager import (
     _merge_series_data as _build_merged_data,
 )
-from src.scraper import make_soup, parse_season_html
+from src.scraper import (
+    _check_error_page,
+    _extract_season_languages,
+    _extract_season_links,
+    _extract_title,
+    _is_logged_in,
+    make_doc,
+    parse_season_html,
+)
 from tests._support import season, series, write_index
 
 PAGE_DIR = Path(__file__).resolve().parent / "fixtures" / "pages"
@@ -60,6 +68,17 @@ def _largest_season_page() -> str | None:
     """
     largest: str | None = None
     for path in PAGE_DIR.glob("season__*.html.gz"):
+        with gzip.open(path, "rt", encoding="utf-8") as fh:
+            html = fh.read()
+        if largest is None or len(html) > len(largest):
+            largest = html
+    return largest
+
+
+def _largest_series_page() -> str | None:
+    """The biggest captured series page, sized like _largest_season_page."""
+    largest: str | None = None
+    for path in PAGE_DIR.glob("series__*.html.gz"):
         with gzip.open(path, "rt", encoding="utf-8") as fh:
             html = fh.read()
         if largest is None or len(html) > len(largest):
@@ -98,16 +117,32 @@ def test_episode_parser_on_a_real_season_page(bench):
 
 
 @pytest.mark.benchmark
-def test_soup_build_on_a_real_season_page(bench):
-    """The BeautifulSoup path the series pages still use.
+def test_series_page_parse_and_extract(bench):
+    """Everything one series page costs: the tree, then all of its readers.
 
-    Kept next to the lxml parser above because the gap between the two is the
-    whole reason the episode parser bypasses soup.
+    Measured as a whole rather than per helper because that is how the
+    scraper pays for it -- once per series, inline on the event loop, where
+    it blocks every fetch the pool has in flight. This replaced a
+    BeautifulSoup build costing ~16ms a page against ~3ms here; the
+    benchmark exists so a future selector change cannot quietly hand that
+    back.
     """
-    html = _largest_season_page()
+    html = _largest_series_page()
     if html is None:
         pytest.skip("no captured pages -- run tests/capture_fixtures.py")
-    bench("make_soup/real_season_page", lambda: make_soup(html), repeats=3)
+
+    def read_one_series_page():
+        doc = make_doc(html)
+        _check_error_page(doc)
+        _is_logged_in(doc)
+        _extract_title(doc)
+        _extract_season_languages(doc)
+        _extract_season_links(doc, "https://burningseries.ac")
+
+    assert _extract_season_links(make_doc(html), "https://burningseries.ac"), (
+        "fixture must yield seasons, or the benchmark measures the empty path"
+    )
+    bench("series_page/parse_and_extract", read_one_series_page)
 
 
 # ── merge and change detection ──────────────────────────────────────────────

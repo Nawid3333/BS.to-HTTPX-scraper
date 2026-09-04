@@ -28,7 +28,18 @@ from typing import Protocol
 from config.config import DATA_DIR, NUM_WORKERS, SERIES_INDEX_FILE, SITE_URL
 from src.atomic_io import atomic_write_json
 from src.index_manager import IndexManager, get_episode_counts, paginate_list
-from src.scraper import BsToScraper, ProgressWriter, _extract_title, _is_logged_in, make_soup
+from src.scraper import (
+    BsToScraper,
+    ProgressWriter,
+    _extract_title,
+    _first,
+    _hc,
+    _is_logged_in,
+    _stripped_text,
+    make_doc,
+)
+from src.term import cinput as input
+from src.term import cprint as print
 
 logger = logging.getLogger(__name__)
 
@@ -75,8 +86,27 @@ def normalize_genre_key(value: object) -> str:
 # ── Site-specific parser ────────────────────────────────────────────────────
 # The only part of this module that differs between the three scrapers.
 
+# lxml translations of the CSS this module used to hand to BeautifulSoup.
+# The genre scan runs once per series page, so it rides the same tree the
+# title and login checks use rather than building a second one.
+# `>` is a child step: div.infos > div must not reach a nested div, or the
+# label test below is applied to the wrong block.
+_XP_INFO_BLOCKS = f".//div[{_hc('infos')}]/div"
+_XP_DIRECT_SPAN = "./span"
+_XP_DIRECT_SPANS = "./span"
 
-def extract_genres(soup) -> list[tuple[str, str]]:
+
+def _class_tokens(el) -> list[str]:
+    """The element's class attribute as the token list bs4 used to return.
+
+    Split rather than substring-tested: `"no-entry" in class_string` would
+    also match `no-entry-wide`, the kind of near-miss that silently drops a
+    real genre instead of raising.
+    """
+    return str(el.get("class") or "").split()
+
+
+def extract_genres(doc) -> list[tuple[str, str]]:
     """Return [(key, label), ...] for every genre on a series page.
 
     bs.to has no genre hrefs -- every genre reaches us as plain text inside
@@ -88,19 +118,19 @@ def extract_genres(soup) -> list[tuple[str, str]]:
     truncate this list behind any CSS marker, so there is no hidden-count
     check here.
     """
-    for block in soup.select("div.infos > div"):
-        label_el = block.find("span", recursive=False)
-        if not label_el or not label_el.get_text(strip=True).startswith("Genres"):
+    for block in doc.xpath(_XP_INFO_BLOCKS):
+        label_el = _first(block, _XP_DIRECT_SPAN)
+        if label_el is None or not _stripped_text(label_el).startswith("Genres"):
             continue
-        p = block.find("p")
+        p = _first(block, ".//p")
         if p is None:
             return []
         out: list[tuple[str, str]] = []
         seen: set[str] = set()
-        for span in p.find_all("span", recursive=False):
-            if "no-entry" in (span.get("class") or []):
+        for span in p.xpath(_XP_DIRECT_SPANS):
+            if "no-entry" in _class_tokens(span):
                 continue
-            label = span.get_text(strip=True).rstrip(",").strip()
+            label = _stripped_text(span).rstrip(",").strip()
             if not label:
                 continue
             key = normalize_genre_key(label)
@@ -240,12 +270,18 @@ async def _scrape_async(site_url: str | None, data: dict, state: dict, *, refetc
                 try:
                     resp = await scraper._get(client, url)  # noqa: SLF001
                     with scraper._profiler.phase("parse"):  # noqa: SLF001
-                        soup = make_soup(resp.text)
-                        genres = extract_genres(soup)
-                        title = _extract_title(soup) or slug
+                        doc = make_doc(resp.text)
+                        if doc is not None:
+                            genres = extract_genres(doc)
+                            title = _extract_title(doc) or slug
                     if not genres:
+                        # A body that is not markup lands here too. make_soup
+                        # used to hand back an empty tree for it, which read as
+                        # "this page has no genres"; make_doc says None instead.
+                        # Kept on the empty branch rather than promoted to a
+                        # failure, so the tally means what it always meant.
                         state["empty"] += 1
-                    if not state["logged_out"] and not _is_logged_in(soup):
+                    if not state["logged_out"] and doc is not None and not _is_logged_in(doc):
                         state["logged_out"] = True
                         logger.warning("Session expired mid-run; genres still parse anonymously")
                 except Exception as exc:  # noqa: BLE001 - one bad page must never end the run

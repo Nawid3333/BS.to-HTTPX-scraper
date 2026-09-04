@@ -30,7 +30,7 @@ from src.genre_stats import (  # noqa: E402
     normalize_genre_key,
     save_genres,
 )
-from src.scraper import _extract_title, make_soup  # noqa: E402
+from src.scraper import _extract_title, _stripped_text, make_doc  # noqa: E402
 
 PAGE_DIR = Path(__file__).resolve().parent / "fixtures" / "pages"
 
@@ -39,11 +39,11 @@ def load_page(name):
     path = PAGE_DIR / f"series__{name}.html.gz"
     if not path.exists():
         return None
-    return make_soup(gzip.decompress(path.read_bytes()).decode("utf-8"))
+    return make_doc(gzip.decompress(path.read_bytes()).decode("utf-8"))
 
 
-def keys_of(soup):
-    return [key for key, _ in extract_genres(soup)]
+def keys_of(doc):
+    return [key for key, _ in extract_genres(doc)]
 
 
 def infos_page(genre_html: str, *, extra: str = ""):
@@ -66,7 +66,7 @@ def infos_page(genre_html: str, *, extra: str = ""):
     </div>
     </body></html>
     """
-    return make_soup(html)
+    return make_doc(html)
 
 
 def series_entry(total, watched, slug):
@@ -91,48 +91,48 @@ class TestGenreScoping(unittest.TestCase):
     has six near-identical child divs, and only one of them is genres."""
 
     def test_a_real_page_yields_only_its_genres(self):
-        soup = load_page("Detektiv-Conan-DC-Case-Closed")
-        if soup is None:
+        doc = load_page("Detektiv-Conan-DC-Case-Closed")
+        if doc is None:
             self.skipTest("fixture not captured")
-        self.assertEqual(keys_of(soup), ["anime", "comedy", "krimi", "mystery"])
+        self.assertEqual(keys_of(doc), ["anime", "comedy", "krimi", "mystery"])
 
     def test_director_and_actor_names_never_leak_into_genres(self):
-        soup = load_page("Detektiv-Conan-DC-Case-Closed")
-        if soup is None:
+        doc = load_page("Detektiv-Conan-DC-Case-Closed")
+        if doc is None:
             self.skipTest("fixture not captured")
-        labels = [label for _, label in extract_genres(soup)]
+        labels = [label for _, label in extract_genres(doc)]
         for leaked in ("Kenji Kodama", "Kenji Kodama,", "TMS Entertainment", "Gosho Aoyama"):
             self.assertNotIn(leaked, labels)
 
     def test_production_years_never_leak_into_genres(self):
-        soup = infos_page("<span>Krimi</span>")
-        self.assertEqual(keys_of(soup), ["krimi"])
+        doc = infos_page("<span>Krimi</span>")
+        self.assertEqual(keys_of(doc), ["krimi"])
 
     def test_a_naive_whole_block_selector_would_have_failed_this(self):
         """Regression guard: div.infos span (unscoped) picks up every sibling
         block's spans too, which is exactly the bug this parser must avoid."""
-        soup = infos_page("<span>Krimi</span>")
-        naive = [s.get_text(strip=True) for s in soup.select("div.infos span")]
+        doc = infos_page("<span>Krimi</span>")
+        naive = [_stripped_text(s) for s in doc.xpath(".//div[@class='infos']//span")]
         self.assertGreater(len(naive), 1, "fixture helper stopped exercising the trap")
-        self.assertEqual(keys_of(soup), ["krimi"])
+        self.assertEqual(keys_of(doc), ["krimi"])
 
 
 class TestNoEntryAndEmpty(unittest.TestCase):
     def test_keine_angabe_parses_as_no_genres(self):
-        soup = infos_page('<span class="no-entry"><i>Keine Angabe</i></span>')
-        self.assertEqual(extract_genres(soup), [])
+        doc = infos_page('<span class="no-entry"><i>Keine Angabe</i></span>')
+        self.assertEqual(extract_genres(doc), [])
 
     def test_a_page_with_no_infos_block_returns_no_genres(self):
-        soup = make_soup("<html><body><p>nothing here</p></body></html>")
-        self.assertEqual(extract_genres(soup), [])
+        doc = make_doc("<html><body><p>nothing here</p></body></html>")
+        self.assertEqual(extract_genres(doc), [])
 
     def test_a_page_with_no_genres_div_returns_no_genres(self):
-        soup = make_soup(
+        doc = make_doc(
             """<html><body><div class="infos">
                  <div><span>Produktionsjahre</span><p><em>2020</em></p></div>
                </div></body></html>"""
         )
-        self.assertEqual(extract_genres(soup), [])
+        self.assertEqual(extract_genres(doc), [])
 
 
 class TestNoUpperBound(unittest.TestCase):
@@ -143,26 +143,26 @@ class TestNoUpperBound(unittest.TestCase):
         genre_html = "".join(
             f"<span>{g}</span>" for g in ("Anime", "Action", "Abenteuer", "Comedy", "Drama", "Fantasy", "Shounen")
         )
-        soup = infos_page(genre_html)
-        self.assertEqual(len(keys_of(soup)), 7)
+        doc = infos_page(genre_html)
+        self.assertEqual(len(keys_of(doc)), 7)
 
     def test_no_fixture_or_inline_case_is_truncated_by_a_hardcoded_limit(self):
         counts = {}
         for path in sorted(PAGE_DIR.glob("series__*.html.gz")) if PAGE_DIR.exists() else []:
-            soup = make_soup(gzip.decompress(path.read_bytes()).decode("utf-8"))
-            genres = extract_genres(soup)
+            doc = make_doc(gzip.decompress(path.read_bytes()).decode("utf-8"))
+            genres = extract_genres(doc)
             if genres:
                 counts[path.name] = len(genres)
-        soup = infos_page("".join(f"<span>g{i}</span>" for i in range(9)))
-        self.assertEqual(len(keys_of(soup)), 9)
+        doc = infos_page("".join(f"<span>g{i}</span>" for i in range(9)))
+        self.assertEqual(len(keys_of(doc)), 9)
 
 
 class TestBoldIsIgnored(unittest.TestCase):
     """A genre is a genre -- the bold style some pages use is not meaningful."""
 
     def test_bold_and_plain_genres_are_both_returned(self):
-        soup = infos_page('<span style="font-weight: bold;">Anime</span><span>Comedy</span>')
-        self.assertEqual(keys_of(soup), ["anime", "comedy"])
+        doc = infos_page('<span style="font-weight: bold;">Anime</span><span>Comedy</span>')
+        self.assertEqual(keys_of(doc), ["anime", "comedy"])
 
 
 class TestSeriesTitles(unittest.TestCase):
@@ -173,15 +173,15 @@ class TestSeriesTitles(unittest.TestCase):
             ("Detektiv-Conan-DC-Case-Closed", "Detektiv Conan | DC | Case Closed"),
             ("Tatort", "Tatort"),
         ):
-            soup = load_page(name)
-            if soup is None:
+            doc = load_page(name)
+            if doc is None:
                 self.skipTest(f"{name} fixture not captured")
             with self.subTest(page=name):
-                self.assertEqual(_extract_title(soup), expected)
+                self.assertEqual(_extract_title(doc), expected)
 
     def test_a_page_with_no_usable_heading_falls_back_to_the_slug(self):
-        soup = make_soup("<html><body><p>no heading here</p></body></html>")
-        self.assertIsNone(_extract_title(soup))
+        doc = make_doc("<html><body><p>no heading here</p></body></html>")
+        self.assertIsNone(_extract_title(doc))
 
 
 class TestGenreIdentity(unittest.TestCase):
