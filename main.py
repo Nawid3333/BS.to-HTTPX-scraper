@@ -947,9 +947,9 @@ def _status_mark(value, width: int = 3) -> str:
 
 def print_header():
     """Print the application header banner."""
-    print(term.style("=" * 60, term._T.CYAN))
+    print(term.accent("=" * 60))
     print(term.step("  BS.TO SERIES SCRAPER & INDEX MANAGER  (httpx)"))
-    print(term.style("=" * 60, term._T.CYAN) + "\n")
+    print(term.accent("=" * 60) + "\n")
 
 
 def print_scraped_series_status(changes=None):

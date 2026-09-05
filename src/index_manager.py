@@ -1122,7 +1122,7 @@ def _prompt_vanished_table(vanished_entries, new_dict, old_data, scraper=None):
 
     # Apply the chosen action to all remaining rows
     if apply_to_all is not None:
-        remaining = rows[current_idx + 1 :] if "current_idx" in locals() else rows
+        remaining = rows[current_idx + 1 :]
         action = apply_to_all
         if action in ("y", "d"):
             print(f"\n  Applying '{action}' to {len(remaining)} remaining entries...")
@@ -1277,8 +1277,7 @@ def show_vanished_series(
                 print(f"      old: {url}")
             print(separator)
 
-        new_dict_for_prompt = new_dict if new_data is not None else {}
-        to_delete = _prompt_vanished_table(vanished, new_dict_for_prompt, old_data, scraper=scraper)
+        to_delete = _prompt_vanished_table(vanished, new_dict, old_data, scraper=scraper)
 
         if to_delete and index_file:
             removed = remove_series_from_index(index_file, to_delete)
