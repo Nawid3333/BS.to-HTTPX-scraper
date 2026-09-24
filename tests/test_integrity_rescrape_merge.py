@@ -73,7 +73,11 @@ ALLOW_EVERYTHING = {
     "season_remove": True,
 }
 
-RESCRAPE = {"urls": ["https://burningseries.ac/serie/Critical"], "titles": ["Critical"]}
+RESCRAPE = {
+    "urls": ["https://burningseries.ac/serie/Critical"],
+    "titles": ["Critical"],
+    "series": {"Critical": _series("Critical", 1, [True, True])},
+}
 
 
 class TestApprovalsSurviveCriticalRescrape(unittest.TestCase):
@@ -115,6 +119,8 @@ class TestApprovalsSurviveCriticalRescrape(unittest.TestCase):
         self.assertIsInstance(action, dict)
         self.assertEqual(action.get("action"), "rescrape")
         self.assertEqual(action["titles"], ["Critical"])
+        # main.py deletes by these entries, so they must be handed back too.
+        self.assertEqual([s["title"] for s in action["series"]], ["Critical"])
 
     def test_approved_watch_change_is_saved(self):
         """The regression: approvals for every other series must persist."""

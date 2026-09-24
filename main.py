@@ -1169,7 +1169,7 @@ def _run_scrape_and_save(
                 # User already confirmed deletion in the integrity dialog — proceed directly
                 n = len(result["urls"])
                 print(f"\n→ Deleting {n} critical series from index before rescraping...")
-                remove_series_from_index(SERIES_INDEX_FILE, result["titles"])
+                remove_series_from_index(SERIES_INDEX_FILE, result["series"])
                 print(f"\n→ Rescraping {n} critical series...\n")
                 return _run_scrape_and_save(
                     run_kwargs={"url_list": result["urls"], "parallel": False},
@@ -1555,14 +1555,13 @@ def generate_report():  # pylint: disable=too-many-locals,too-many-branches
                 print(row.rstrip())
 
         ongoing_titles = report["categories"]["ongoing"]["titles"]
+        ongoing_urls = report["categories"]["ongoing"]["urls"]
         if ongoing_count > 0:
             print("\n  ONGOING SERIES")
             idx_w = len(str(min(ongoing_count, 10)))
             base_url = (ACTIVE_SITE_URL or SITE_URLS[0]).rstrip("/")
             items = []
-            for title in ongoing_titles[:10]:
-                series_data = manager.series_index.get(title, {})
-                url = series_data.get("url") or series_data.get("link")
+            for title, url in zip(ongoing_titles[:10], ongoing_urls[:10], strict=True):
                 if url and not url.startswith("http"):
                     url = f"{base_url}{url}"
                 items.append((title, url))
@@ -1580,7 +1579,7 @@ def generate_report():  # pylint: disable=too-many-locals,too-many-branches
             # Exported automatically: appending is additive and de-duplicated,
             # so there is nothing to lose by doing it, and the old prompt only
             # stood between the report and an up-to-date batch file.
-            _export_ongoing_urls(manager, ongoing_titles, active_site_url=ACTIVE_SITE_URL)
+            _export_ongoing_urls(ongoing_urls, active_site_url=ACTIVE_SITE_URL)
 
         print("\n  SAVED TO")
         print(f"    {report_file}")
@@ -1646,14 +1645,12 @@ def _append_urls_to_batch_file(urls_file, urls):
     return fresh, len(urls) - len(fresh)
 
 
-def _export_ongoing_urls(manager, ongoing_titles, active_site_url=None):
+def _export_ongoing_urls(ongoing_urls, active_site_url=None):
     """Export ongoing series URLs to series_urls.txt."""
     try:
         urls = []
         base_url = (active_site_url or ACTIVE_SITE_URL or SITE_URLS[0]).rstrip("/")
-        for title in ongoing_titles:
-            series_data = manager.series_index.get(title, {})
-            url = series_data.get("url") or series_data.get("link")
+        for url in ongoing_urls:
             if url:
                 if not url.startswith("http"):
                     url = f"{base_url}{url}"
