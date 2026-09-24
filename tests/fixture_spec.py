@@ -1,8 +1,8 @@
 """Which parser outputs the golden fixtures pin, for this site.
 
-Each project defines the same two names so `capture_fixtures.py` and
-`test_golden_parse.py` stay identical across the three scrapers; only this
-adapter differs.
+Each project defines the same names so `capture_fixtures.py`,
+`test_golden_parse.py` and `site_check.py` stay identical across the three
+scrapers; only this adapter differs.
 """
 
 from src.scraper import (  # noqa: E402
@@ -11,6 +11,7 @@ from src.scraper import (  # noqa: E402
     _extract_season_links,
     _extract_title,
     _is_logged_in,
+    _login_url,
     _parse_episodes,
     make_doc,
 )
@@ -19,6 +20,25 @@ SCRAPER_CLASS_NAME = "BsToScraper"
 SLUG_RE = r"/serie/([^/?#]+)"
 SERIES_PATH = "/serie/{slug}"
 CATALOGUE_PATH = "/andere-serien"
+
+# ── Live site check (tests/site_check.py) ──────────────────────────────────
+# The login form fields _login_client posts. It sends security_token even
+# when the page has none, so a missing token field is a login about to fail.
+LOGIN_FIELDS = ("login[user]", "login[pass]", "security_token")
+# Read by config.config; set as repository secrets for the monthly workflow.
+CREDENTIAL_VARS = ("BS_USERNAME", "BS_PASSWORD")
+# Long-running series that should outlive any one check. A slug that has
+# gone is skipped, and series linked from the home page are tried after these.
+PROBE_SLUGS = ("Breaking-Bad", "Better-Call-Saul", "Die-Simpsons")
+# The index held 10,628 series in September 2026. Far below that, the
+# catalogue parse is losing series rather than the site shrinking.
+MIN_CATALOGUE = 5000
+# bs.to has no subscribe or watchlist buttons to read.
+HAS_ACCOUNT_BUTTONS = False
+
+
+def login_url(site_url: str) -> str:
+    return _login_url(site_url)
 
 
 def parse_all(html: str, slug: str, base_url: str) -> dict:
