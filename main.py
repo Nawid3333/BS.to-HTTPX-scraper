@@ -883,18 +883,21 @@ def _suggest_something_to_watch(idx_mgr: _IndexLike | None = None):
     if selected == "__back__":
         return
 
-    candidates = []
-    for title, series in idx_mgr.series_index.items():
+    # genre_index.json files each series under its slug, so join on the slug
+    # exactly as genre_stats does. Looking it up by title found genres only
+    # where a title happened to equal its slug -- 1,450 of 10,628 series
+    # (2026-09-26) -- so a genre filter silently dropped most of its matches.
+    candidates: list[tuple[dict, list]] = []
+    for slug, series in genre_stats._index_by_slug(idx_mgr).items():
         if not isinstance(series, dict):
             continue
         watched = series.get("watched_episodes", 0)
         total = series.get("total_episodes", 0)
         if watched == 0 and total > 0:
-            if selected != "all":
-                genres = series_genres.get(title, [])
-                if selected not in genres:
-                    continue
-            candidates.append(series)
+            genres = series_genres.get(slug, [])
+            if selected != "all" and selected not in genres:
+                continue
+            candidates.append((series, genres))
 
     if not candidates:
         suffix = f" for genre '{choices[selected]}'" if selected != "all" else ""
@@ -907,16 +910,12 @@ def _suggest_something_to_watch(idx_mgr: _IndexLike | None = None):
     print(f"\n\ud83c\udfb2 {len(sample)} suggestion(s) from {len(candidates)} unwatched series:\n")
 
     idx_w = len(str(len(sample)))
-    title_w = max((len(s.get("title", "Unknown")) for s in sample), default=0)
-    total_w = max((len(str(s.get("total_episodes", 0))) for s in sample), default=0) + 5
+    title_w = max((len(s.get("title", "Unknown")) for s, _ in sample), default=0)
+    total_w = max((len(str(s.get("total_episodes", 0))) for s, _ in sample), default=0) + 5
     genre_w = max(
-        (
-            len(", ".join(genre_labels.get(g, g) for g in series_genres.get(s.get("title", ""), [])) or "\u2014")
-            for s in sample
-        ),
-        default=0,
+        (len(", ".join(genre_labels.get(g, g) for g in genres) or "\u2014") for _, genres in sample), default=0
     )
-    link_w = max((len(s.get("url") or s.get("link", "")) for s in sample), default=0)
+    link_w = max((len(s.get("url") or s.get("link", "")) for s, _ in sample), default=0)
     header = (
         f"    {'#':<{idx_w}}  {'Title':<{title_w}}  {'Watched/Total':<{total_w}}"
         f"  {'Sub':<3}  {'WL':<3}  {'Genres':<{genre_w}}  {'Link':<{link_w}}"
@@ -924,7 +923,7 @@ def _suggest_something_to_watch(idx_mgr: _IndexLike | None = None):
     print(header)
     sep = f"    {'─' * idx_w}  {'─' * title_w}  {'─' * total_w}  {'─' * 3}  {'─' * 3}  {'─' * genre_w}  {'─' * link_w}"
     print(sep)
-    for i, series in enumerate(sample, 1):
+    for i, (series, genres) in enumerate(sample, 1):
         title = series.get("title", "Unknown")
         link = series.get("url") or series.get("link", "")
         watched = series.get("watched_episodes", 0)
@@ -935,7 +934,6 @@ def _suggest_something_to_watch(idx_mgr: _IndexLike | None = None):
         # counts as visible characters and collapses the column.
         sub_mark = _status_mark(sub)
         wl_mark = _status_mark(wl)
-        genres = series_genres.get(title, [])
         genre_str = ", ".join(genre_labels.get(g, g) for g in genres) if genres else "\u2014"
         row = (
             f"    {i:<{idx_w}}  {title:<{title_w}}  {watched}/{total:<{total_w - 2}}"
