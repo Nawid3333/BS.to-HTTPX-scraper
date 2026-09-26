@@ -2527,9 +2527,14 @@ class BsToScraper:  # pylint: disable=too-many-instance-attributes
         if len(truly_new) <= 50:
             for s in truly_new:
                 print(f"  + {s['title']}")
+        # Flagged renames are part of truly_new, so this scrapes them too and
+        # the post-scrape table reads their real data from series_data. This
+        # used to append their catalogue stubs (title, link, url) afterwards,
+        # a leftover from when renames were skipped: each flagged rename was
+        # then in series_data twice, and keyed by title the stub won -- the
+        # table showed a six-episode series as 0/0 and the save would have
+        # added it to the index with no seasons.
         await self._scrape_list(truly_new, num_workers=1)
-        # Ensure matched rename data is available for the post-scrape table.
-        self.series_data.extend([s for s in new_list if s.get("title") in rename_titles])
 
     async def _run_all(self, tmp):
         """Scrape all series (default mode)."""

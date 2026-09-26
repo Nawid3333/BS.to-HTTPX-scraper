@@ -423,6 +423,54 @@ class TestRenameGuessNeverSkipsAScrape(QuietCase):
         self.assertEqual(hits, {"Steins;Gate 0"})
 
 
+class TestFlaggedRenamesAreScrapedOnce(QuietCase):
+    """A new-only run must hand the rest of the run one entry per series.
+
+    Flagged renames were scraped and then appended again as bare catalogue
+    stubs (title, link, url). Keyed by title the stub came last and won:
+    "Alpensaga", six episodes on the site, showed as 0/0 in the vanished
+    table, and the save would have added it to the index with no seasons.
+    """
+
+    def _run_new_only(self, catalogue, vanished):
+        scraper = SCRAPER_CLS()
+
+        async def scrape_list(series_list, num_workers=None):
+            for info in series_list:
+                episodes = [{"number": 1, "watched": False, "title": f"{info['title']} 1"}]
+                scraper.series_data.append({**info, "seasons": [{"season": "1", "episodes": episodes}]})
+
+        with (
+            mock.patch.object(scraper, "_revalidate_ignored_series", mock.AsyncMock()),
+            mock.patch.object(scraper, "_get_all_series", mock.AsyncMock(return_value=catalogue)),
+            mock.patch.object(scraper, "_confirm_catalogue_size", return_value=True),
+            mock.patch.object(scraper, "_check_ignored_vs_catalog"),
+            mock.patch.object(scraper, "_check_index_vs_catalog"),
+            mock.patch.object(scraper, "load_existing_slugs", return_value=set()),
+            mock.patch.object(scraper, "get_ignored_slugs", return_value=set()),
+            mock.patch.object(scraper, "_vanished_index_entries", return_value=vanished),
+            mock.patch.object(scraper, "_scrape_list", side_effect=scrape_list),
+        ):
+            asyncio.run(scraper._run_new_only(None))
+        return scraper.series_data
+
+    def test_a_flagged_rename_is_in_the_results_once_with_its_episodes(self):
+        catalogue = [
+            {"title": "Alpensaga", "link": "/serie/Alpensaga", "url": series_url("Alpensaga")},
+            {"title": "Brand New", "link": "/serie/Brand-New", "url": series_url("Brand-New")},
+        ]
+        vanished = [("Die Alpensaga", series_url("Die-Alpensaga"))]
+        self.assertEqual(
+            sc._find_vanished_renames(vanished, catalogue), {"Alpensaga"}, "the premise: Alpensaga is flagged"
+        )
+
+        results = self._run_new_only(catalogue, vanished)
+
+        self.assertEqual(sorted(s["title"] for s in results), ["Alpensaga", "Brand New"], "each series exactly once")
+        for entry in results:
+            self.assertTrue(im._is_scrape_result(entry), f"{entry['title']} must carry its scraped seasons")
+
+
 class TestShortCatalogueIsQueried(TempDirCase):
     """A truncated catalogue makes every absent series look vanished."""
 
