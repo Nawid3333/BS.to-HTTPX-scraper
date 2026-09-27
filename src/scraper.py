@@ -1749,7 +1749,7 @@ class BsToScraper:  # pylint: disable=too-many-instance-attributes
         seasons_data = []
         total_watched, total_eps = 0, 0
 
-        season_pages = await self._fetch_season_pages(client, season_links)
+        season_pages = self._parse_season_pages(await self._fetch_season_pages(client, season_links))
 
         # A season page that came back logged out yields a full, well-formed
         # episode table with every row unwatched, so it has to be caught here
@@ -1758,7 +1758,7 @@ class BsToScraper:  # pylint: disable=too-many-instance-attributes
         # the second read is still anonymous.
         if self._any_season_logged_out(season_pages):
             if await self._relogin_shared_client(client):
-                season_pages = await self._fetch_season_pages(client, season_links)
+                season_pages = self._parse_season_pages(await self._fetch_season_pages(client, season_links))
             if self._any_season_logged_out(season_pages):
                 logger.error("Season pages served logged out for %s", url)
                 return self._error_result(info, "season page not logged in")
@@ -1769,16 +1769,10 @@ class BsToScraper:  # pylint: disable=too-many-instance-attributes
                     info,
                     f"season {label} fetch failed: {page}",
                 )
-            with self._profiler.phase("parse"):
-                # One tree per season page, read three ways: the login
-                # marker, the episode rows, and bs.to's season-level
-                # language dropdown. parse_season_page would rebuild it.
-                doc = make_doc(page)
-                logged_in, episodes = _parse_season_doc(doc, self._account_name)
-                season_languages = _extract_season_languages(doc)
+            logged_in, episodes, season_languages = page
             if episodes is not None and not logged_in:
-                # Belt and braces: _any_season_logged_out already screened the
-                # batch, so reaching here means the page changed between reads.
+                # Belt and braces: _any_season_logged_out screened these same
+                # results, so this only fires if that screen is ever changed.
                 return self._error_result(info, f"season {label}: not logged in")
             if episodes is None:
                 # None means the page had no episode table at all, or had
@@ -1853,17 +1847,41 @@ class BsToScraper:  # pylint: disable=too-many-instance-attributes
                 self._account_name = name
                 logger.debug("Account name for season-page checks: %s", name)
 
-    def _any_season_logged_out(self, season_pages) -> bool:
-        """True if any successfully fetched season page came back anonymous.
+    def _parse_season_pages(self, season_pages) -> list:
+        """Parse each fetched season page exactly once.
 
-        Exceptions are left alone: a failed fetch is already handled per
-        season further down, and reporting it as a login problem here would
-        mask the real reason.
+        Returns, position for position, (logged_in, episodes, languages) for
+        a page that was fetched, or the fetch's exception unchanged. One tree
+        per page, read three ways: the login marker, the episode rows, and
+        bs.to's season-level language dropdown. The logged-out screen and the
+        per-season loop both read these results; each used to parse every
+        page itself, which doubled the parse cost for no information. A
+        refetch after a re-login is parsed afresh by calling this again on the
+        new pages.
         """
+        parsed = []
         for page in season_pages:
             if isinstance(page, BaseException):
+                parsed.append(page)
                 continue
-            logged_in, episodes = parse_season_page(page, self._account_name)
+            with self._profiler.phase("parse"):
+                doc = make_doc(page)
+                logged_in, episodes = _parse_season_doc(doc, self._account_name)
+                parsed.append((logged_in, episodes, _extract_season_languages(doc)))
+        return parsed
+
+    @staticmethod
+    def _any_season_logged_out(parsed_pages) -> bool:
+        """True if any successfully fetched season page came back anonymous.
+
+        Takes _parse_season_pages' results. Exceptions are left alone: a
+        failed fetch is already handled per season further down, and reporting
+        it as a login problem here would mask the real reason.
+        """
+        for page in parsed_pages:
+            if isinstance(page, BaseException):
+                continue
+            logged_in, episodes, _languages = page
             if episodes is not None and not logged_in:
                 return True
         return False
