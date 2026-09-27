@@ -34,6 +34,7 @@ from config.config import (
     SEASON_CONCURRENCY,
     SERIES_INDEX_FILE,
     SITE_URLS,
+    USE_HTTP2,
     USERNAME,
 )
 from src import term
@@ -1551,7 +1552,7 @@ class BsToScraper:  # pylint: disable=too-many-instance-attributes
     ) -> httpx.AsyncClient:
         """Create an httpx client and log in to bs.to."""
         client = httpx.AsyncClient(
-            http2=True,
+            http2=USE_HTTP2,
             headers={"User-Agent": UA},
             timeout=httpx.Timeout(
                 REQUEST_TIMEOUT,
@@ -2622,7 +2623,7 @@ class BsToScraper:  # pylint: disable=too-many-instance-attributes
         client = None
         try:
             client = httpx.AsyncClient(
-                http2=True,
+                http2=USE_HTTP2,
                 headers={"User-Agent": UA},
                 timeout=httpx.Timeout(REQUEST_TIMEOUT, connect=10.0),
                 follow_redirects=True,
@@ -2875,7 +2876,7 @@ class BsToScraper:  # pylint: disable=too-many-instance-attributes
             normalised_vanished.append((v_title, v_url))
 
         client = httpx.AsyncClient(
-            http2=True,
+            http2=USE_HTTP2,
             headers={"User-Agent": UA},
             timeout=httpx.Timeout(REQUEST_TIMEOUT, connect=10.0),
             follow_redirects=True,
