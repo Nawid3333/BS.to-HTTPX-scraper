@@ -153,36 +153,28 @@ DEFAULT_BATCH_FILE_PATH = os.path.join(PROJECT_HOME, "series_urls.txt")
 DEFAULT_BATCH_FILE = os.path.abspath(DEFAULT_BATCH_FILE_PATH)
 
 # ==================== SCRAPING SETTINGS ====================
-# Measured, not guessed. Two sweeps on one shared login, series shuffled
-# per pass and worker counts run in random order:
+# Measured, not guessed -- on the owner's PC (~100 Mbit/s, ~20 ms to the
+# site), tests/throughput_sweep.py, September 2026:
 #
-#   250 series x2   4: 11.78   6: 15.78   8: 17.69  12: 18.18  16: 19.32
-#   300 series x3                        12: 17.14  16: 16.70  20: 16.30
-#                                        24: 16.55  32: 16.61
+#   HTTP/2 (one connection), 150 series x2     HTTP/1.1, 1000 series x2
+#   workers  pages/s  ttfb50                   workers  pages/s  CPU
+#      4       34.7    90ms                       8       64.6   25%
+#      8       52.8   131ms                      16       88.2   35%
+#     16       57.8   292ms                      24      104.7   42%
+#     24       53.2   463ms                      32      132.2   54%
+#                                                48      124.5   75%
 #
-# Throughput climbs steeply to 8, flattens by 12, and is indistinguishable
-# from 12 to 32 -- the two sweeps disagree on whether 16 beats 12, which is
-# itself the answer: past 12 the differences are session noise, not signal.
-# 12 was fastest in the longer sweep and the steadiest there (spread 0.33
-# vs 3.12 at 24), so it is the last setting that buys anything real.
+# HTTP/2 is capped at ~55 pages/s by the site: it serves one connection only
+# so fast. HTTP/1.1 climbs to ~130 at 32 workers and is site-limited past
+# that. Neither the line (4% at most) nor this process (<=55% of a core at
+# the best setting) is the limit.
 #
-# The earlier note here recommended 4 on stability grounds from a sweep
-# that stopped at 12; the wider sweep shows 4 costs ~35% throughput for
-# no benefit. Zero 429/503 was seen anywhere up to 32 workers, so this
-# plateau is local saturation, not the site pushing back -- raising it
-# further only adds load.
-# Past the peak the season fan-out already keeps pool_workers *
-# SEASON_CONCURRENCY requests in flight, so more workers only add load.
-#
-# Where the time actually goes, measured with the built-in PhaseProfiler
-# over 300 series x2 shuffled passes at these settings:
-#   network 99.5%   parse 0.4%   checkpoint <0.1%
-# Parsing costs 7% of ONE core across the run, so the scrape is bound by
-# the network and not by this process. Offloading parse off the event loop was
-# already measured 2-2.7x SLOWER (see parse_season_html), and the lxml parser
-# cut per-page parse time another 3.8x on top, so there is nothing left to
-# win here. Do not reopen this without a fresh profile showing otherwise.
-NUM_WORKERS = int(os.getenv("BS_MAX_WORKERS", "12"))
+# 16 rather than 32 because under 24+ workers bs.to briefly renders pages
+# logged out while the session stays valid (#4: 25 of 24,975 pages at 48
+# workers, 0 in ~12k at 8-32). The scraper refuses such pages, so no bad
+# data gets in, but they cost retries; raise this only after a capture at
+# the higher count shows them handled.
+NUM_WORKERS = int(os.getenv("BS_MAX_WORKERS", "16"))
 
 # Season pages of one series are independent GETs. Fetching them one after
 # another made a series' scrape time scale linearly with its season count,
@@ -193,12 +185,17 @@ SEASON_CONCURRENCY = int(os.getenv("BS_SEASON_CONCURRENCY", "4"))
 
 # HTTP/2 multiplexes every request over ONE connection per host; HTTP/1.1
 # opens up to NUM_WORKERS * SEASON_CONCURRENCY parallel connections instead.
-# Which one the site serves faster is the site's business, not ours, so it is
-# switchable for measuring (tests/throughput_sweep.py compares both).
-# BS_HTTP2=0 selects HTTP/1.1, and so do false/no/off: a value that reads
-# as "off" must not quietly keep HTTP/2. Anything else, unset included,
-# keeps HTTP/2.
-USE_HTTP2 = os.getenv("BS_HTTP2", "1").strip().lower() not in ("0", "false", "no", "off")
+# This site caps one connection at ~55 pages/s (above), so HTTP/1.1 is the
+# default. BS_HTTP2=1 (or true/yes/on) switches HTTP/2 back on; anything
+# else, unset included, uses HTTP/1.1.
+USE_HTTP2 = os.getenv("BS_HTTP2", "").strip().lower() in ("1", "true", "yes", "on")
+
+# If the site starts pushing back on a full run -- "Site pushed back" or
+# "Session had expired; logged back in" in the log, or series failing --
+# the sweep's samples did not cover that load. No code change is needed to
+# back off; set these in .env instead:
+#   BS_MAX_WORKERS=8                 HTTP/1.1 with less load (64.6 pages/s above)
+#   BS_HTTP2=1 + BS_MAX_WORKERS=12   the previous defaults: one connection
 
 
 # Checkpoint frequency: serialize resume state every N completed series.
