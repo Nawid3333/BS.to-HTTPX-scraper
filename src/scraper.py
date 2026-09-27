@@ -636,6 +636,7 @@ _XP_SEASONS_LINKS = ".//*[@id='seasons']//a"
 _XP_SEASONS_LI_LINKS = ".//*[@id='seasons']//li//a"
 _XP_STAFFEL_HREF = ".//a[contains(@href, 'staffel-')]"
 _XP_ANY_LINK = ".//a[@href]"
+_XP_ANY_HREF = ".//@href"
 
 
 def _first(doc, xpath):
@@ -862,6 +863,28 @@ def _extract_season_links(
             seen.add(key)
             links.append((label, url))
     return links
+
+
+# An episode link names its season: serie/<slug>/2/12345-Episode-Title.
+_EPISODE_HREF_RE = re.compile(r"/?serie/[^/]+/(\d+)/\d+-")
+
+
+def _shown_season(doc, season_links: list[tuple[str, str]]) -> int | None:
+    """Which of `season_links` the series page's own episode table is, by index; None if unsure.
+
+    The series page embeds one season's full episode table. Which one is read
+    off the page's episode links, never assumed to be the first: 47 of 300
+    random series list season 0 first while the page shows season 1 (#4).
+    Every episode link on the page has to name the same season -- they did on
+    all 300 -- and exactly one season link has to point at it. Anything else
+    is None, and the caller fetches every season as it always did.
+    """
+    shown = {m.group(1) for href in doc.xpath(_XP_ANY_HREF) if (m := _EPISODE_HREF_RE.match(str(href)))}
+    if len(shown) != 1:
+        return None
+    season = re.compile(rf"/serie/[^/]+/{shown.pop()}(?:/|$)")
+    hits = [i for i, (_label, url) in enumerate(season_links) if season.search(url)]
+    return hits[0] if len(hits) == 1 else None
 
 
 def _heading_text(el) -> str:
@@ -1805,7 +1828,7 @@ class BsToScraper:  # pylint: disable=too-many-instance-attributes
         seasons_data = []
         total_watched, total_eps = 0, 0
 
-        season_pages = self._parse_season_pages(await self._fetch_season_pages(client, season_links))
+        season_pages = await self._read_season_pages(client, doc, season_links)
 
         # A season page that came back logged out yields a full, well-formed
         # episode table with every row unwatched, so it has to be caught here
@@ -1927,6 +1950,34 @@ class BsToScraper:  # pylint: disable=too-many-instance-attributes
                 logged_in, episodes = _parse_season_doc(doc, self._account_name)
                 parsed.append((logged_in, episodes, _extract_season_languages(doc)))
         return parsed
+
+    async def _read_season_pages(self, client, doc, season_links) -> list:
+        """Every season, parsed as _parse_season_pages does, reading one of them off the series page.
+
+        The series page already carries one season's full episode table and
+        its language dropdown. Live, on 300 random series (#4), both were
+        identical to that season's own page, episode for episode including the
+        watched flags, 300 times out of 300, and fetching that season again
+        cost one of the 3.00 requests a series took. Only the other seasons
+        are fetched now.
+
+        The reused table passes the same login check as any season page, and
+        goes back in its own position, so the logged-out screen and the
+        first-failure-wins loop see the list they always did. Anything short
+        of that -- no clear season (_shown_season), no table, an empty one, or
+        a table that fails the check -- fetches every season as before. A
+        re-login refetches all of them, this one included.
+        """
+        shown = _shown_season(doc, season_links)
+        if shown is not None:
+            with self._profiler.phase("parse"):
+                logged_in, episodes = _parse_season_doc(doc, self._account_name)
+            if logged_in and episodes:
+                reused = (logged_in, episodes, _extract_season_languages(doc))
+                others = season_links[:shown] + season_links[shown + 1 :]
+                fetched = self._parse_season_pages(await self._fetch_season_pages(client, others))
+                return [*fetched[:shown], reused, *fetched[shown:]]
+        return self._parse_season_pages(await self._fetch_season_pages(client, season_links))
 
     async def _reread_page(self, client, url):
         """Fetch `url` once more after a short jittered pause; its tree, or None.
