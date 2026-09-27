@@ -156,25 +156,24 @@ DEFAULT_BATCH_FILE = os.path.abspath(DEFAULT_BATCH_FILE_PATH)
 # Measured, not guessed -- on the owner's PC (~100 Mbit/s, ~20 ms to the
 # site), tests/throughput_sweep.py, September 2026:
 #
-#   HTTP/2 (one connection), 150 series x2     HTTP/1.1, 1000 series x2
-#   workers  pages/s  ttfb50                   workers  pages/s  CPU
-#      4       34.7    90ms                       8       64.6   25%
-#      8       52.8   131ms                      16       88.2   35%
-#     16       57.8   292ms                      24      104.7   42%
-#     24       53.2   463ms                      32      132.2   54%
-#                                                48      124.5   75%
+#   HTTP/2 (one connection), 150 series x2   HTTP/1.1, 1000 series x2
+#   workers  pages/s  ttfb50                 workers  pages/s  ttfb50  CPU
+#      4       34.7    90ms                     16      97.6    61ms   28%
+#      8       52.8   131ms                     24     116.9    73ms   33%
+#     16       57.8   292ms                     32     140.0    80ms   41%
+#     24       53.2   463ms                     48     146.4   160ms   65%
 #
 # HTTP/2 is capped at ~55 pages/s by the site: it serves one connection only
-# so fast. HTTP/1.1 climbs to ~130 at 32 workers and is site-limited past
-# that. Neither the line (4% at most) nor this process (<=55% of a core at
-# the best setting) is the limit.
+# so fast. HTTP/1.1 climbs to 140 at 32 workers; 48 adds under 5% while the
+# time-to-first-byte doubles, which is the site starting to queue. Neither
+# the line (5% at most) nor this process (41% of a core at 32) is the limit:
+# unlike S.to and AniWorld, this site sets the ceiling.
 #
-# 16 rather than 32 because under 24+ workers bs.to briefly renders pages
-# logged out while the session stays valid (#4: 25 of 24,975 pages at 48
-# workers, 0 in ~12k at 8-32). The scraper refuses such pages, so no bad
-# data gets in, but they cost retries; raise this only after a capture at
-# the higher count shows them handled.
-NUM_WORKERS = int(os.getenv("BS_MAX_WORKERS", "16"))
+# Under 24+ workers bs.to briefly renders pages logged out while the session
+# stays valid (#4: 25 of 24,975 pages at 48 workers). The scraper reads such
+# a page once more before blaming the session; at 48 workers that absorbed
+# all 39 flickers of an 8,000-series run with 0 logins and 0 failed series.
+NUM_WORKERS = int(os.getenv("BS_MAX_WORKERS", "32"))
 
 # Season pages of one series are independent GETs. Fetching them one after
 # another made a series' scrape time scale linearly with its season count,
@@ -194,8 +193,8 @@ USE_HTTP2 = os.getenv("BS_HTTP2", "").strip().lower() in ("1", "true", "yes", "o
 # "Session had expired; logged back in" in the log, or series failing --
 # the sweep's samples did not cover that load. No code change is needed to
 # back off; set these in .env instead:
-#   BS_MAX_WORKERS=8                 HTTP/1.1 with less load (64.6 pages/s above)
-#   BS_HTTP2=1 + BS_MAX_WORKERS=12   the previous defaults: one connection
+#   BS_MAX_WORKERS=16                HTTP/1.1 with half the load (97.6 pages/s above)
+#   BS_HTTP2=1 + BS_MAX_WORKERS=12   the original defaults: one connection
 
 
 # Checkpoint frequency: serialize resume state every N completed series.

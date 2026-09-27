@@ -8,7 +8,7 @@ Uses **httpx** (no browser needed) with a multi-session architecture for fast, p
 
 ## Features
 
-- **Multi-session parallel scraping** — 16 concurrent workers over HTTP/1.1 by default (configurable in `config/config.py` or via `BS_MAX_WORKERS`)
+- **Multi-session parallel scraping** — 32 concurrent workers over HTTP/1.1 by default (configurable in `config/config.py` or via `BS_MAX_WORKERS`)
 - **Host probing** — checks all configured hosts before scraping, compares site series count with the local index, and writes a `mismatch_report.json` when differences or duplicate slugs are detected
 - **Duplicate slug detection** — finds duplicate slugs in the index and offers to delete them before continuing
 - **Smart per-series ETA estimation** — each series stores its own `avg_scrape_seconds` (exponential moving average for ETA prediction) and `scrape_duration_seconds` (actual duration of the most recent scrape) in the index. ETA is predicted by summing those per-series averages for the remaining work, then blended with the live session rate (historical 85%→45% as progress increases). Because the database is stable, per-series history is the best predictor.
@@ -140,7 +140,7 @@ Built-in fallback hosts: `bs.cine.to`, `burningseries.ac`, `burningseries.cx`.
 Scraping parallelism can be adjusted in `config/config.py`:
 
 ```python
-NUM_WORKERS = 16  # Number of parallel workers
+NUM_WORKERS = 32  # Number of parallel workers
 ```
 
 ## Tuning
@@ -149,14 +149,14 @@ All optional, with sensible defaults. Set them in `.env`.
 
 | Variable                | Default | What it does                                                                                                                                                             |
 | ----------------------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `BS_MAX_WORKERS`        | `16`    | Concurrent scraping sessions. Measured, not guessed: over HTTP/1.1 throughput keeps climbing to ~32, but 16 is the highest count at which the site never served a page logged out. |
+| `BS_MAX_WORKERS`        | `32`    | Concurrent scraping sessions. Measured, not guessed: over HTTP/1.1 throughput climbs to 140 pages/s at 32; past that the site starts queuing and 48 adds under 5%. |
 | `BS_SEASON_CONCURRENCY` | `4`     | Season pages fetched at once per series. Total requests in flight is workers x this.                                                                                     |
 | `BS_HTTP2`              | `0`     | `1` (or `true`/`on`) switches to one multiplexed HTTP/2 connection. The default is parallel HTTP/1.1: the site caps one connection at ~55 pages/s. |
 | `BS_CHECKPOINT_EVERY`   | `50`    | Save resume state every N series.                                                                                                                                        |
 | `BS_PROFILE`            | unset   | Set to `1` to print where a run's time actually went (network vs parse vs disk).                                                                                         |
 | `BS_HOME` | unset | Where `.env`, `data/`, `logs/` and the default batch file live. Unset, that is this checkout. Set it when you install the package, so they do not land in site-packages. Must be a real environment variable — it cannot be set inside `.env`, because it is what locates that file. |
 
-**If a full run starts meeting push-back.** The defaults (HTTP/1.1, 16 workers) were measured on
+**If a full run starts meeting push-back.** The defaults (HTTP/1.1, 32 workers) were measured on
 samples with no push-back at all, but a full run keeps that load up for much longer.
 The scraper already pauses every worker by itself when the site answers 429/503 or returns a burst
 of server errors (five 500/502/504 within five seconds); each pause logs `Site pushed back`. If that
@@ -164,10 +164,10 @@ line keeps coming back, or the log shows `Session had expired; logged back in`, 
 failing, back off in `.env`, no code change needed:
 
 ```
-BS_MAX_WORKERS=8                # HTTP/1.1 with less load
+BS_MAX_WORKERS=16               # HTTP/1.1 with half the load
 ```
 
-or return to the previous defaults, one HTTP/2 connection with 12 workers:
+or return to the original defaults, one HTTP/2 connection with 12 workers:
 
 ```
 BS_HTTP2=1
@@ -220,7 +220,7 @@ Shows up to 10 random unwatched series. You can filter by a specific genre via t
 ### Scraping Modes (Option 1)
 
 1. **Single session** — one httpx client, sequential (most reliable)
-2. **Multi-session** — 12 parallel workers (default, faster)
+2. **Multi-session** — 32 parallel workers (default, faster)
 
 ### Batch File Format (Option 5)
 
