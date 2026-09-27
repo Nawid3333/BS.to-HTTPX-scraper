@@ -365,7 +365,8 @@ def _remove_duplicate_index_entries(idx_mgr, index_duplicates):
     standing, and which one that should be is a judgement the program cannot
     make: a slug repeats because a series was renamed, because the site reused
     it, or because one scrape stored a stale title. Each slug is shown with
-    everything that tells its copies apart, and the choice is the user's.
+    everything that tells its copies apart, and the choice is the user's --
+    including deleting every copy, so a new-only scrape adds it back fresh.
     """
     dup_extra = sum(index_duplicates.values()) - len(index_duplicates)
     print(f"\n    [WARN] Found {len(index_duplicates)} duplicate slug(s) in index (extra count: {dup_extra})")
@@ -377,6 +378,7 @@ def _remove_duplicate_index_entries(idx_mgr, index_duplicates):
             by_slug.setdefault(slug, []).append((title, series))
 
     removed_titles = []
+    cleared_slugs = []
     for slug in sorted(by_slug):
         entries = sorted(by_slug[slug], key=lambda kv: kv[0].lower())
         if len(entries) < 2:
@@ -389,21 +391,30 @@ def _remove_duplicate_index_entries(idx_mgr, index_duplicates):
             print(f"         {seasons} season(s), {watched}/{total} watched")
             print(f"         {series.get('url') or series.get('link', '')}")
 
-        choice = (
-            input("      " + term.danger("keep which?") + term.dim(f" (1-{len(entries)}, s=skip, a=abort): "))
-            .strip()
-            .lower()
+        # "1-2" once read as the input format, so the hint spells out that a
+        # number names the one copy to keep; anything else is asked again.
+        choice = term.ask(
+            "      "
+            + term.danger("keep which?")
+            + term.dim(f" (number 1 to {len(entries)} keeps that one, d=delete all, s=skip, a=abort): "),
+            [str(n) for n in range(1, len(entries) + 1)] + ["d", "s", "a"],
+            safe="s",
+            hint=f"type a number from 1 to {len(entries)}, d, s or a",
         )
         if choice == "a":
             print("      aborted - nothing further changed.")
             break
-        if not choice or choice == "s":
+        if choice == "s":
             print("      skipped - every copy kept.")
             continue
-        if not choice.isdigit() or not 1 <= int(choice) <= len(entries):
-            print("      not one of the listed options - skipped, every copy kept.")
+        if choice == "d":
+            for title, _series in entries:
+                if title in idx_mgr.series_index:
+                    del idx_mgr.series_index[title]
+                    removed_titles.append(title)
+            cleared_slugs.append(slug)
+            print(f"      deleted all {len(entries)} - 'Scrape only NEW series' adds it back from the site.")
             continue
-
         keep = int(choice) - 1
         for position, (title, _series) in enumerate(entries):
             if position != keep and title in idx_mgr.series_index:
@@ -416,7 +427,9 @@ def _remove_duplicate_index_entries(idx_mgr, index_duplicates):
         return
 
     idx_mgr.save_index()
-    print(f"\n    Removed {len(removed_titles)} duplicate entry(s); one copy of each resolved slug kept.")
+    print(f"\n    Removed {len(removed_titles)} duplicate entry(s).")
+    if cleared_slugs:
+        print(f"    {len(cleared_slugs)} slug(s) now have no entry - run 'Scrape only NEW series' to add them back.")
     logger.info("Removed %d duplicate index entries: %s", len(removed_titles), removed_titles[:10])
 
 
@@ -777,17 +790,11 @@ def _prompt_clean_vanished(idx_mgr: IndexManager | None = None, scraper=None, se
 
     kept_titles = {title for title, _ in kept}
     kept_slugs = {slug for slug, title in title_by_slug.items() if title in kept_titles}
-    if kept_slugs:
-        try:
-            prompt = f"\nStop reporting the {len(kept_slugs)} kept entry(s) as vanished? (y/n): "
-            answer = input(prompt).strip().lower()
-        except EOFError:
-            answer = "n"
-        if answer == "y":
-            ignored = _load_ignored_vanished()
-            ignored.update(kept_slugs)
-            _save_ignored_vanished(ignored)
-            print(f"  Ignored {len(kept_slugs)} vanished slug(s) — will not prompt again.")
+    if kept_slugs and term.confirm(f"\nStop reporting the {len(kept_slugs)} kept entry(s) as vanished? (y/n): "):
+        ignored = _load_ignored_vanished()
+        ignored.update(kept_slugs)
+        _save_ignored_vanished(ignored)
+        print(f"  Ignored {len(kept_slugs)} vanished slug(s) — will not prompt again.")
 
     if removed:
         logger.info("Removed %d vanished series from index after scrape: %s", removed, titles[:10])
@@ -1167,11 +1174,9 @@ def _check_checkpoint(expected_mode=None):
 
     if expected_mode is None or saved_mode == expected_mode:
         print(f'\n\u26a0 Checkpoint found from a previous "{saved_label}" run!\n')
-        choice = input("Resume from checkpoint? (y/n): ").strip().lower()
-        if choice == "y":
+        if term.confirm("Resume from checkpoint? (y/n): "):
             return {"ok": True, "resume": True}
-        discard = input(term.danger("Discard old checkpoint and start fresh?") + term.dim(" (y/n): ")).strip().lower()
-        if discard == "y":
+        if term.confirm(term.danger("Discard old checkpoint and start fresh?") + term.dim(" (y/n): ")):
             with contextlib.suppress(OSError):
                 os.remove(cp_file)
             return {"ok": True, "resume": False}
@@ -1180,8 +1185,7 @@ def _check_checkpoint(expected_mode=None):
     expected_label = _MODE_LABELS.get(expected_mode, expected_mode)
     print(f'\n\u26a0 A checkpoint exists from a different mode: "{saved_label}"')
     print(f'   You are about to run: "{expected_label}"\n')
-    discard = input(term.danger("Discard the old checkpoint and continue?") + term.dim(" (y/n): ")).strip().lower()
-    if discard == "y":
+    if term.confirm(term.danger("Discard the old checkpoint and continue?") + term.dim(" (y/n): ")):
         with contextlib.suppress(OSError):
             os.remove(cp_file)
         return {"ok": True, "resume": False}
@@ -1387,15 +1391,11 @@ def scrape_series():
     print("  1. Single session (slower, but most reliable)")
     print(f"  2. Multi-session (faster, {NUM_WORKERS} parallel sessions)")
     print("  0. Back\n")
-    mode_choice = input("Choose mode (0-2) [default: 2]: ").strip() or "2"
+    mode_choice = term.ask("Choose mode (0-2): ", ("0", "1", "2"), safe="0")
 
     if mode_choice == "0":
         return
-    if mode_choice not in ("1", "2"):
-        print("\u26a0 Invalid choice, using default (multi-session)")
-        use_parallel = True
-    else:
-        use_parallel = mode_choice == "2"
+    use_parallel = mode_choice == "2"
 
     _run_scrape_and_save(
         run_kwargs={
@@ -1464,15 +1464,11 @@ def scrape_unwatched():
     print("  1. Single session (slower, but most reliable)")
     print(f"  2. Multi-session (faster, {NUM_WORKERS} parallel sessions)")
     print("  0. Back\n")
-    mode_choice = input("Choose mode (0-2) [default: 2]: ").strip() or "2"
+    mode_choice = term.ask("Choose mode (0-2): ", ("0", "1", "2"), safe="0")
 
     if mode_choice == "0":
         return
-    if mode_choice not in ("1", "2"):
-        print("\u26a0 Invalid choice, using default (multi-session)")
-        use_parallel = True
-    else:
-        use_parallel = mode_choice == "2"
+    use_parallel = mode_choice == "2"
 
     _run_scrape_and_save(
         run_kwargs={
@@ -1493,50 +1489,54 @@ def single_or_batch_add():
     print("\n\u2192 Add single link / batch from file")
     print("  \u2022 Paste URL \u2192 scrapes single series")
     print("  \u2022 Enter filename \u2192 uses that file for batch")
-    print(f"  \u2022 Press Enter \u2192 uses default ({default_file})")
+    print(f"  \u2022 Type 1   \u2192 uses {default_file}")
     print("  \u2022 Type 0   \u2192 back to main menu\n")
 
-    user_input = input(f"Enter [default: {default_file}]: ").strip()
+    # No default and no dead end: Enter used to mean the default file, and a
+    # missing file went back to the main menu. Each is asked again now, and
+    # so is a URL that is not a series page; only 0 goes back.
+    for _ in range(term.MAX_UNRECOGNIZED):
+        try:
+            user_input = input("URL, filename, 1 or 0: ").strip()
+        except EOFError:
+            return
+        if user_input == "0":
+            return
+        if user_input == "1":
+            user_input = default_file
+        if not user_input:
+            print("  \u26a0 No answer - paste a URL, type a filename, 1 or 0.")
+        elif user_input.startswith(("http://", "https://")):
+            problem = _series_url_problem(user_input)
+            if problem is None:
+                _add_single_series_by_url(user_input)
+                return
+            print(f"  \u26a0 {problem} - try again, or 0 to go back.")
+        elif os.path.exists(user_input):
+            _batch_add_from_file(user_input)
+            return
+        else:
+            print(f"  \u26a0 File not found: {user_input} - try again, or 0 to go back.")
+    print(f"  \u26a0 No usable answer after {term.MAX_UNRECOGNIZED} tries; back to the main menu.")
 
-    if user_input == "0":
-        return
-    if not user_input:
-        user_input = default_file
 
-    if user_input.startswith(("http://", "https://")):
-        _add_single_series_by_url(user_input)
-    else:
-        _batch_add_from_file(user_input)
+def _series_url_problem(url):
+    """Return why *url* is not a bs.to series page, or None if it is."""
+    example_host = (ACTIVE_SITE_URL or SITE_URLS[0]).rstrip("/")
+    try:
+        parsed_url = urlparse(url)
+    except ValueError:
+        logger.error("Invalid URL format: %s", url)
+        return "Invalid URL format"
+    if not parsed_url.netloc or parsed_url.netloc not in VALID_SERIES_HOSTS:
+        return "Invalid series host URL"
+    if not _SERIE_URL_RE.search(parsed_url.path):
+        return f"URL must be a valid series page (e.g. {example_host}/serie/Breaking-Bad)"
+    return None
 
 
 def _add_single_series_by_url(url):
-    """Validate a single bs.to series URL and scrape it, retrying on bad input."""
-    example_host = (ACTIVE_SITE_URL or SITE_URLS[0]).rstrip("/")
-
-    while True:
-        if not url or url == "0":
-            return
-        if not url.startswith(("http://", "https://")):
-            print("\u2717 Invalid URL (must start with http:// or https://)")
-            url = input("Enter series URL (or 0 to cancel): ").strip()
-            continue
-        try:
-            parsed_url = urlparse(url)
-            if not parsed_url.netloc or parsed_url.netloc not in VALID_SERIES_HOSTS:
-                print("\u2717 Invalid series host URL")
-                url = input("Enter series URL (or 0 to cancel): ").strip()
-                continue
-            if not _SERIE_URL_RE.search(parsed_url.path):
-                print(f"\u2717 URL must be a valid series page (e.g. {example_host}/serie/Breaking-Bad)")
-                url = input("Enter series URL (or 0 to cancel): ").strip()
-                continue
-        except ValueError:
-            print("\u2717 Invalid URL format")
-            logger.error("Invalid URL format: %s", url)
-            url = input("Enter series URL (or 0 to cancel): ").strip()
-            continue
-        break
-
+    """Scrape one bs.to series; single_or_batch_add has already checked the URL."""
     print("\n\u2192 Scraping single series...\n")
 
     scraper = _run_scrape_and_save(
@@ -1820,8 +1820,7 @@ def _batch_add_from_file(file_path):
     for url in urls:
         print(f"  \u2022 {url}")
 
-    confirm = input("\nProceed with batch add? (y/n): ").strip().lower()
-    if confirm != "y":
+    if not term.confirm("\nProceed with batch add? (y/n): "):
         print("\u2717 Cancelled")
         return
 
@@ -1888,10 +1887,8 @@ def main():
 
     print(f"\u2713 Credentials found for user: {USERNAME}\n")
 
-    if not check_disk_space():
-        response = input("Continue anyway? (y/n): ").strip().lower()
-        if response != "y":
-            sys.exit(1)
+    if not check_disk_space() and not term.confirm("Continue anyway? (y/n): "):
+        sys.exit(1)
 
     scraper = BsToScraper()
     _probe_sites_before_scrape(scraper, idx_mgr=idx_mgr)
