@@ -214,6 +214,39 @@ class TestParseEpisodesTakesDoc(unittest.TestCase):
         """Same shape, no rows: still [] (a real season state), not None."""
         self.assertEqual(_parse_episodes(make_doc("<table class='episodes'></table>")), [])
 
+    def test_an_episode_row_without_a_number_fails_the_page(self):
+        """One unkeyable row among good ones used to be skipped.
+
+        The season was then stored one episode short, its watched flag with
+        it, while aniworld and s.to treat the same row as a parse failure.
+        """
+        html = (
+            "<table class='episodes'>"
+            "<tr><td>1</td><td><strong>Eins</strong></td></tr>"
+            "<tr><td></td><td><strong>Zwei</strong></td></tr>"
+            "</table>"
+        )
+        self.assertIsNone(_parse_episodes(make_doc(html)))
+
+    def test_an_episode_row_with_a_non_numeric_number_fails_the_page(self):
+        html = (
+            "<table class='episodes'>"
+            "<tr><td>1</td><td><strong>Eins</strong></td></tr>"
+            "<tr><td>2a</td><td><strong>Zwei</strong></td></tr>"
+            "</table>"
+        )
+        self.assertIsNone(_parse_episodes(make_doc(html)))
+
+    def test_a_header_row_is_still_skipped(self):
+        """Selector 4 takes every <tr>; a row with no data cell is not an episode."""
+        html = (
+            "<table class='episodes'>"
+            "<tr><th>#</th><th>Titel</th></tr>"
+            "<tr><td>1</td><td><strong>Eins</strong></td></tr>"
+            "</table>"
+        )
+        self.assertEqual(_parse_episodes(make_doc(html)), [{"number": 1, "watched": False, "title": "Eins"}])
+
 
 # ==================== TASK 1: unparseable season handling ====================
 class _FakeResponse:

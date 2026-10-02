@@ -124,50 +124,119 @@ def _rehost_series_url(url):
     return f"{SITE_URL}{path}", True
 
 
-def _validate_series_entry(series, title=""):
-    """Validate series entry structure. Returns True if valid."""
+def _series_entry_problem(series):
+    """Return why *series* cannot be used as an index entry, or None if it can.
+
+    Everything checked here is something the rest of this module relies on
+    without looking: a title to key on, a series URL, and seasons and
+    episodes that are objects in lists. An entry with "seasons": null used to
+    pass and then fail every save with a TypeError. Either field may hold the
+    URL: an entry whose "url" was blanked but whose "link" is intact still
+    knows which series it is.
+    """
     if not isinstance(series, dict):
-        logger.warning(
-            "Skipping invalid series entry (not dict): %s",
-            title,
-        )
-        return False
+        return f"not an entry ({type(series).__name__})"
+    if not series.get("title"):
+        return "no title"
     url = series.get("url", "") or series.get("link", "")
     if not url:
-        logger.warning(
-            "Skipping series '%s' - missing 'url' or 'link' field",
-            title,
-        )
-        return False
+        return "no 'url' or 'link'"
     if _series_path_of(url) is None:
-        logger.warning(
-            "Skipping series '%s' - invalid URL scheme/format: %s",
-            title,
-            url[:80],
-        )
-        return False
-    seasons = series.get("seasons")
-    if seasons is not None and not isinstance(seasons, list):
-        logger.warning(
-            "Skipping series '%s' - 'seasons' must be list, got %s",
-            title,
-            type(seasons),
-        )
-        return False
-    # Validate episode structure within seasons
-    for season in seasons or []:
+        return f"not a series URL: {str(url)[:80]}"
+    seasons = series.get("seasons", [])
+    if not isinstance(seasons, list):
+        return f"'seasons' is {type(seasons).__name__}, not a list"
+    for season in seasons:
         if not isinstance(season, dict):
-            continue
-        episodes = season.get("episodes")
-        if episodes is not None and not isinstance(episodes, list):
-            logger.error(
-                "Rejecting series '%s' — season '%s' has CORRUPT episodes (type=%s, expected list)",
-                title,
-                season.get("season", "?"),
-                type(episodes).__name__,
-            )
-            return False
+            return f"a season is {type(season).__name__}, not an object"
+        episodes = season.get("episodes", [])
+        if not isinstance(episodes, list):
+            return f"season '{season.get('season', '?')}': 'episodes' is {type(episodes).__name__}, not a list"
+        if not all(isinstance(ep, dict) for ep in episodes):
+            return f"season '{season.get('season', '?')}': an episode is not an object"
+    return None
+
+
+def _validate_series_entry(series, title=""):
+    """Validate series entry structure. Returns True if valid."""
+    problem = _series_entry_problem(series)
+    if problem:
+        logger.warning("Index entry '%s' cannot be used: %s", title, problem)
+        return False
     return True
+
+
+def _file_stamp(path):
+    """Return (mtime_ns, size) for *path*, or None when there is no file to stat.
+
+    Together the two tell whether a file was rewritten since it was read:
+    every save goes through a fresh temp file, so even a same-size rewrite
+    gets a new modification time.
+    """
+    try:
+        stat = os.stat(path)
+    except OSError:
+        return None
+    return stat.st_mtime_ns, stat.st_size
+
+
+def _read_index_json(path):
+    """Return the parsed index file; raise if it cannot be read as one.
+
+    Raises on every way a read can fail -- the file locked by another
+    program, bytes that are not UTF-8, text that is not JSON, JSON that is
+    not a list or dict -- so the caller handles them all the same way. This
+    used to return None for JSON and I/O errors only: an encoding error
+    escaped as a crash, and confirm_and_save_changes, which read the file
+    through it directly, took None for an empty index.
+    """
+    with open(path, encoding="utf-8") as f:
+        data = json.load(f)
+    if not isinstance(data, (list, dict)):
+        raise ValueError(f"the file holds a {type(data).__name__}, not a list of series")
+    return data
+
+
+def _describe_read_error(exc):
+    """One line on why the index file could not be read, for the user."""
+    if isinstance(exc, PermissionError):
+        return f"another program has it locked or access was denied ({exc})"
+    if isinstance(exc, UnicodeDecodeError):
+        return f"it is not UTF-8 text -- was it saved in another encoding by an editor? ({exc})"
+    if isinstance(exc, json.JSONDecodeError):
+        return f"it is not valid JSON ({exc})"
+    return str(exc) or type(exc).__name__
+
+
+def _index_file_entries(data):
+    """Return the entries of a parsed index file as a list, in file order.
+
+    A file in the old {title: entry} layout gives its key as the title of an
+    entry that has none of its own, so writing it back as a list keeps the
+    name it was stored under.
+    """
+    if isinstance(data, dict):
+        return [
+            dict(entry, title=entry.get("title") or key) if isinstance(entry, dict) else entry
+            for key, entry in data.items()
+        ]
+    return list(data)
+
+
+def _split_index_entries(data):
+    """Split a parsed index file into usable entries and (entry, reason) pairs for the rest.
+
+    Nothing is dropped here: what cannot be used is handed back with the
+    reason, so the caller can keep it in the file.
+    """
+    usable, unusable = [], []
+    for entry in _index_file_entries(data):
+        problem = _series_entry_problem(entry)
+        if problem:
+            unusable.append((entry, problem))
+        else:
+            usable.append(entry)
+    return usable, unusable
 
 
 def _is_scrape_result(entry):
@@ -409,13 +478,7 @@ def remove_series_from_index(index_file, series_to_remove):
         return 0
     removal_set = {_series_identity(entry) for entry in series_to_remove}
     try:
-        with open(index_file, encoding="utf-8") as f:
-            data = json.load(f)
-
-        if isinstance(data, dict):
-            data = list(data.values())
-        if not isinstance(data, list):
-            return 0
+        data = _index_file_entries(_read_index_json(index_file))
         filtered = [entry for entry in data if not (isinstance(entry, dict) and _series_identity(entry) in removal_set)]
         removed = len(data) - len(filtered)
 
@@ -427,7 +490,11 @@ def remove_series_from_index(index_file, series_to_remove):
                 list(removal_set)[:10],
             )
         return removed
-    except (json.JSONDecodeError, OSError):
+    except (ValueError, OSError) as e:
+        # ValueError covers JSON and encoding errors alike. Nothing was
+        # written, so the file is as it was; say so rather than report 0.
+        print(f"  ✗ The index file could not be read, so nothing was removed: {_describe_read_error(e)}")
+        logger.error("remove_series_from_index could not read %s: %s", index_file, e)
         return 0
 
 
@@ -474,20 +541,23 @@ def replace_series_in_index(index_file, replacements):
     the addition to the later new-series prompt would lose the series the
     moment that prompt was declined.
 
+    The replacement may also be the same series read again, at the same
+    link -- the integrity check's rescrape (replace_critical_series). The
+    entries being replaced therefore do not count as already holding their
+    replacement's URL; only the rest of the index does.
+
     Returns (removed, added).
     """
     if not replacements or not os.path.exists(index_file):
         return 0, 0
     try:
-        with open(index_file, encoding="utf-8") as f:
-            data = json.load(f)
-
-        if isinstance(data, dict):
-            data = list(data.values())
-        if not isinstance(data, list):
-            return 0, 0
+        data = _index_file_entries(_read_index_json(index_file))
         new_by_old = {_series_identity(old): new for old, new in replacements}
-        indexed_slugs = {_extract_slug(entry) for entry in data if isinstance(entry, dict)} - {None}
+        indexed_slugs = {
+            _extract_slug(entry)
+            for entry in data
+            if isinstance(entry, dict) and _series_identity(entry) not in new_by_old
+        } - {None}
         now = datetime.now().isoformat()
         result = []
         removed = added = 0
@@ -513,7 +583,9 @@ def replace_series_in_index(index_file, replacements):
                 [(old.get("url"), new.get("url")) for old, new in replacements][:10],
             )
         return removed, added
-    except (json.JSONDecodeError, OSError):
+    except (ValueError, OSError) as e:
+        print(f"  ✗ The index file could not be read, so nothing was replaced: {_describe_read_error(e)}")
+        logger.error("replace_series_in_index could not read %s: %s", index_file, e)
         return 0, 0
 
 
@@ -1018,7 +1090,8 @@ def _rescrape_rows(rows: list, scraper, old_data: dict) -> int:
     Only trusts a fetched title when the page was actually reached:
     verify_vanished_and_candidates returns every entry it was handed, with a
     reachability flag, so a non-empty result says nothing on its own — the
-    flag is what separates "still there under a new name" from "really gone".
+    flag is what separates "still there under a new name" from "really gone",
+    and None from both: a check that could not tell.
 
     Returns how many rows were updated from a reachable page.
     """
@@ -1083,6 +1156,11 @@ def _rescrape_rows(rows: list, scraper, old_data: dict) -> int:
             row["v_url"] = new_v_url or row["v_url"]
             print(f"  ✓ {v_title}: old URL still reachable. Title now: {new_v_title}")
             updated.add(id(row))
+        elif reachable is None:
+            # A timeout or a 5xx says nothing about the series. This used to
+            # share the branch below, so one bad moment on the site was
+            # announced as "really gone" right before the delete decision.
+            print(f"  ⚠ {v_title}: old URL could not be checked right now — nothing changed; try again later.")
         else:
             print(f"  ✗ {v_title}: old URL not reachable — the series really is gone.")
 
@@ -1777,8 +1855,19 @@ def show_vanished_series(
             f"{len(candidate_entries)} new series could be renames. "
             "Re-scrape all candidate URLs for verification? (y/n): "
         ):
-            _, verified_new_data = asyncio.run(scraper.verify_vanished_and_candidates(vanished, candidate_entries))
-            new_data = verified_new_data
+            # Guarded like _rescrape_rows: a failed sign-in or a dropped
+            # connection here used to escape into the run's catch-all and
+            # throw away the whole save that follows, every approval with it.
+            # Verification only sharpens the table; without it the run's own
+            # data still stands.
+            try:
+                _, verified_new_data = asyncio.run(scraper.verify_vanished_and_candidates(vanished, candidate_entries))
+            except Exception as exc:  # pylint: disable=broad-exception-caught
+                logger.warning("Live verification of %d candidate(s) failed: %s", len(candidate_entries), exc)
+                print(f"  ✗ Verification failed: {exc}")
+                print("    Continuing with this run's own data; nothing is decided without you.")
+            else:
+                new_data = verified_new_data
 
     if corrupt_entries:
         count = len(corrupt_entries)
@@ -2134,83 +2223,6 @@ def show_changes(
 
     print("\n" + "=" * 70)
     return total
-
-
-def _read_index_json(index_file):
-    """Read and parse series_index.json from disk.
-
-    Returns the raw parsed data (list or dict), or None on error.
-    Handles missing file, corrupt JSON, and I/O errors.
-    """
-    if not os.path.exists(index_file):
-        logger.info(
-            "No existing index found at %s",
-            index_file,
-        )
-        return None
-    try:
-        with open(
-            index_file,
-            encoding="utf-8",
-        ) as f:
-            data = json.load(f)
-        if not isinstance(data, (list, dict)):
-            print("\u26a0 Index file is not a valid list or dict, ignoring.")
-            logger.error("Index file is not a valid list or dict.")
-            return None
-        return data
-    except json.JSONDecodeError as exc:
-        print(f"[ERROR] Index file corrupted: {exc}")
-        logger.error("Index file corrupted: %s", exc)
-        return None
-    except OSError as exc:
-        print(f"[ERROR] Cannot read index file: {exc}")
-        logger.error("Cannot read index file: %s", exc)
-        return None
-
-
-def _has_usable_entries(data):
-    """True when `data` holds at least one dict carrying a title.
-
-    A backup can be readable JSON and still be worthless -- truncated to an
-    empty list, or holding only elements the loader will skip. Telling those
-    apart from a real restore is what lets the search move on to .bak2.
-    """
-    items = data.values() if isinstance(data, dict) else data
-    return any(isinstance(item, dict) and item.get("title") for item in items)
-
-
-def _try_restore_backup_data(index_file):
-    """Return index data from the newest readable backup, or None.
-
-    A save that failed midway can leave the index missing or truncated while
-    the previous copy sits in .bak1. Loading an empty index instead makes
-    every series look brand new, so the backups are consulted first.
-    """
-    backup_dir = os.path.dirname(index_file)
-    filename = os.path.basename(index_file)
-    for i in range(1, 4):
-        backup_path = os.path.join(backup_dir, f"{filename}.bak{i}")
-        if not os.path.exists(backup_path):
-            continue
-        try:
-            with open(backup_path, encoding="utf-8") as f:
-                data = json.load(f)
-            if isinstance(data, (list, dict)) and _has_usable_entries(data):
-                return data
-            # A readable backup holding nothing usable is not a restore.
-            # Returning it anyway ended the search here, so a truncated .bak1
-            # hid a perfectly good .bak2 behind it.
-            logger.warning("Backup %s held no usable entries; trying the next", backup_path)
-        except (json.JSONDecodeError, OSError) as exc:
-            logger.warning("Backup %s also unreadable: %s", backup_path, exc)
-    return None
-
-
-def _load_existing_index(index_file=SERIES_INDEX_FILE):
-    """Load current series index from disk (list or empty)."""
-    data = _read_index_json(index_file)
-    return data if data is not None else []
 
 
 def _cascade_declined_new_content(changes, allowed):
@@ -2575,6 +2587,24 @@ def _merge_existing_series(  # pylint: disable=too-many-locals
             # derived counters so they cannot drift away from it.
             sync_season_counts(old_seasons[season_label])
         else:
+            # A season the index has never seen. Its episodes are new episodes
+            # like any other and pass the same two gates: they enter only if
+            # the user approved new episodes, and enter unwatched unless the
+            # watched state was approved too. A new season used to skip both,
+            # so declining "Add these new episodes?" still added the whole
+            # season, watched flags and all.
+            approved = []
+            for ep in new_season.get("episodes", []):
+                if not allowed.get("new_episodes", True):
+                    continue
+                if isinstance(ep, dict) and ep.get("watched", False) and not allowed.get("watched"):
+                    ep["watched"] = False
+                approved.append(ep)
+            if new_season.get("episodes") and not approved:
+                # Nothing of it was approved: leave the season out, so the
+                # next scrape offers it again.
+                continue
+            new_season["episodes"] = approved
             sync_season_counts(new_season)
             old_seasons[season_label] = new_season
 
@@ -2822,7 +2852,7 @@ def _extract_critical_series_for_rescrape(mismatches, old_data, active_site_url=
 
 
 def _prompt_episode_mismatches(mismatches, old_data=None, active_site_url=None):
-    """Prompt user for warning/critical issues with option to delete & rescrape.
+    """Prompt user for warning/critical issues with option to rescrape & replace.
 
     Returns:
         tuple: (proceed: bool, rescrape_data: dict or None)
@@ -2923,7 +2953,8 @@ def _prompt_episode_mismatches(mismatches, old_data=None, active_site_url=None):
         print("\nOPTIONS")
         print("─" * term_w)
         print("1) Proceed with merge despite issues")
-        print(f"2) Delete index & rescrape {len(critical)} critical series")
+        # Nothing is deleted on this answer: see replace_critical_series.
+        print(f"2) Rescrape {len(critical)} critical series, then replace each one you approve")
         print("3) Cancel (discard all changes)\n")
         choice = term.ask("Choose option (1-3): ", ("1", "2", "3"), safe="3")
 
@@ -3034,6 +3065,71 @@ def _prompt_title_renames(renames, old_data, new_dict):
     return approved
 
 
+def replace_critical_series(old_entries, new_data, index_file):
+    """Offer each re-read critical series in place of its index entry; apply the yeses in one write.
+
+    The integrity check's rescrape option ("Delete index & rescrape") used to
+    delete the critical series first and rescrape them after. A rescrape that
+    failed, or an n at the new-series prompt that followed, then left the
+    series gone with its whole watch history -- and these are the series
+    flagged because the site lost episodes, where the index is the only
+    record left. Nothing is deleted up front now. Each series that came back
+    is shown beside its index entry, the way the vanished table shows a swap,
+    and only a y replaces it; a series that did not come back, a n, end of
+    input or a run of unusable answers all keep the entry exactly as it is.
+
+    *old_entries* are the index entries the dialog chose; *new_data* is what
+    the rescrape read. Returns (replaced, kept).
+    """
+    fresh_by_slug = {}
+    for entry in new_data or []:
+        slug = _extract_slug(entry) if _is_scrape_result(entry) else None
+        if slug is not None:
+            fresh_by_slug[slug] = entry
+    manager = IndexManager(index_file)
+    if manager.unreadable:
+        print("  ✗ The index could not be read, so no critical series was replaced.")
+        return 0, len(old_entries)
+    # The entries as the index holds them now: this run's merge saved its
+    # approved changes to them before the rescrape started.
+    current = {_series_identity(entry): entry for entry in manager.series_index.values()}
+
+    pairs = []
+    print(f"\n[CRITICAL SERIES RESCRAPED] {len(old_entries)} series")
+    print("   (manual confirmation required)")
+    for position, old in enumerate(old_entries, 1):
+        indexed: dict = current.get(_series_identity(old)) or old
+        title = str(indexed.get("title") or "?")
+        fresh = fresh_by_slug.get(_extract_slug(indexed))
+        print(f"\n  [{position}/{len(old_entries)}] {title}")
+        if fresh is None:
+            print("  ✗ It could not be read again -- kept in the index as it is.")
+            continue
+        old_progress = _series_progress_line(indexed)
+        width = max(len("Old (index)"), len(title), len(old_progress))
+        print(f"        {'Old (index)':<{width}} │ New (site)")
+        print(f"        {title:<{width}} │ {fresh.get('title', title)}")
+        print(f"        {old_progress:<{width}} │ {_series_progress_line(fresh)}")
+        lines, differences = _replacement_differences(indexed, fresh)
+        print("      Index (old) vs. site (new):")
+        for line in lines or ["(no seasons on either side)"]:
+            print(f"        {line}")
+        print(f"      ⚠ {differences} difference(s)" if differences else "      ✓ identical")
+        if term.confirm(
+            "  " + term.danger("Replace the index entry with what the site shows now?") + term.dim(" (y/n): ")
+        ):
+            pairs.append((indexed, fresh))
+        else:
+            print("  -> Kept in the index as it is.")
+
+    replaced = replace_series_in_index(index_file, pairs)[1] if pairs else 0
+    if replaced:
+        print(f"\n  ✓ Replaced {replaced} critical series with what the site shows now.")
+    else:
+        print("\n  ✓ No series replaced -- the index is unchanged.")
+    return replaced, len(old_entries) - replaced
+
+
 def confirm_and_save_changes(new_data, description="data", active_site_url=None, index_manager=None):
     """Show changes, prompt, merge, and save.
 
@@ -3044,9 +3140,15 @@ def confirm_and_save_changes(new_data, description="data", active_site_url=None,
 
     Returns (saved: bool, changes: dict | None).
     """
-    old_entries = list(index_manager.series_index.values()) if index_manager is not None else _load_existing_index()
-    if isinstance(old_entries, dict):
-        old_entries = list(old_entries.values())
+    # Through an IndexManager either way. Without one this read the file raw:
+    # an unreadable index came back as an empty list -- no backup tried -- so
+    # every scraped series looked new, and the save then wrote that run's few
+    # series over the whole file. The manager restores from a backup, keeps
+    # entries it cannot use, and asks before replacing a file it could not
+    # read or that changed since (IndexManager.save_index).
+    if index_manager is None:
+        index_manager = IndexManager(SERIES_INDEX_FILE)
+    old_entries = list(index_manager.series_index.values())
 
     new_entries = list(new_data if isinstance(new_data, list) else dict(new_data).values())
     skipped_errors = [s for s in new_entries if isinstance(s, dict) and s.get("_error")]
@@ -3121,7 +3223,7 @@ def confirm_and_save_changes(new_data, description="data", active_site_url=None,
     if mismatches:
         proceed, rescrape_data = _prompt_episode_mismatches(mismatches, old_data, active_site_url=active_site_url)
         if rescrape_data:
-            # User chose to delete & rescrape critical series
+            # User chose to rescrape the critical series and replace them
             print(f"\n→ Preparing to rescrape {len(rescrape_data['titles'])} critical series...")
 
             # Held, not returned. Returning here used to skip the merge
@@ -3135,8 +3237,8 @@ def confirm_and_save_changes(new_data, description="data", active_site_url=None,
                 "action": "rescrape",
                 "urls": rescrape_data["urls"],
                 "titles": rescrape_data["titles"],
-                # The entries themselves, for remove_series_from_index: a title
-                # alone would also delete any other series sharing it.
+                # The entries themselves, for replace_critical_series: a title
+                # alone would also match any other series sharing it.
                 "series": list(rescrape_data["series"].values()),
             }
         elif not proceed:
@@ -3172,12 +3274,16 @@ def confirm_and_save_changes(new_data, description="data", active_site_url=None,
         logger.info("User discarded changes. Nothing saved.")
         return False, None
 
+    previous = index_manager.series_index
     try:
-        if index_manager is None:
-            index_manager = IndexManager(SERIES_INDEX_FILE)
         series_list = [_order_series_entry(series) for series in merged.values()]
         index_manager.series_index = _key_series(series_list)
-        index_manager.save_index()
+        if not index_manager.save_index():
+            # The file on disk was not what this session loaded and the user
+            # kept it: the manager goes back to what it held, and the
+            # rescrape is cancelled with the rest.
+            index_manager.series_index = previous
+            return False, None
         print(f"\u2713 Saved {len(series_list)} series to index")
         logger.info(
             "Saved %d series to %s",
@@ -3196,6 +3302,21 @@ class IndexManager:
 
     series_index: dict[str, dict]
 
+    # Set by load_index. The class-level values are what a manager built
+    # without loading anything (IndexManager.__new__ in a test) works with.
+    #
+    # unusable_entries: entries in the file that cannot be used, kept and
+    #     written back untouched. Dropping them here used to mean the next save
+    #     deleted them, watch history and all, without a word.
+    # unreadable: why the index file could not be read when it was loaded,
+    #     or None. While it is set, a save asks before replacing that file.
+    # restored_from: the backup this session's index came from, or None.
+    unusable_entries: list | tuple = ()
+    unreadable: str | None = None
+    restored_from: str | None = None
+    _disk_stamp: tuple[int, int] | None = None
+    _loaded_identities: frozenset = frozenset()
+
     def __init__(self, index_file):
         self.index_file = index_file
         self.series_index = {}
@@ -3204,66 +3325,214 @@ class IndexManager:
     def load_index(self):
         """Load series index from JSON with corruption detection.
 
-        Converts both list and dict formats to dict format.
-        Validates loaded data for consistency.
+        Converts both list and dict formats to dict format. Every way the
+        file can fail to read is handled alike: say why, then load the newest
+        backup that holds anything usable. One malformed entry used to raise
+        inside validation and load the whole index as empty, and an encoding
+        error crashed the load outright. The file is never written over from
+        here, and save_index asks before it replaces one that could not be
+        read.
         """
-        self._load_index_unlocked()
-
-    def _load_index_unlocked(self):
-        """Actual index loading logic."""
         self.series_index = {}
-        data = _read_index_json(self.index_file)
-        if data is None:
-            data = _try_restore_backup_data(self.index_file)
-            if data is None:
-                return
-            print("[INFO] Index unreadable — restored from backup.")
-            logger.warning("Index unreadable at %s; restored from backup", self.index_file)
-        try:
-            # _key_series skips non-dict elements: .get() on one raises
-            # AttributeError, and the broad handler below turns that into an
-            # empty index -- one stray element used to discard every good entry.
-            # Backup data arrives here too, so this covers the restore path.
-            if isinstance(data, list):
-                self.series_index = _key_series(data)
-            elif isinstance(data, dict):
-                self.series_index = _key_series(data.values())
+        self.unusable_entries = []
+        self.unreadable = None
+        self.restored_from = None
+        # Taken before the read, so a write that lands in between shows up as
+        # a change when this session saves, rather than being written over.
+        self._disk_stamp = _file_stamp(self.index_file)
+        if not os.path.exists(self.index_file):
+            # A save that failed midway can leave the index missing while the
+            # previous copy sits in .bak1. Loading an empty index instead makes
+            # every series look brand new, so the backups are consulted first.
+            if self._restore_from_backup():
+                print("[INFO] Index file missing — restored from backup.")
+                logger.warning("Index file missing at %s; restored from backup", self.index_file)
             else:
-                self.series_index = {}
-
-            validated = {}
-            rehosted = 0
-            for title, series in self.series_index.items():
-                if not (_validate_series_entry(series, str(title))):
-                    continue
-                # An entry stored against a mirror that has since left _SITE_URLS
-                # keeps its data and gets its host rewritten. It used to be dropped
-                # here and then written out of the index by the next save.
-                moved = False
-                for field in ("url", "link"):
-                    value = series.get(field)
-                    if value:
-                        new_value, changed = _rehost_series_url(value)
-                        if changed:
-                            series[field] = new_value
-                            moved = True
-                rehosted += bool(moved)
-                validated[title] = series
-            # Re-keyed without the rejected entries, so a series only carries
-            # its slug in its key while another valid one shares its title.
-            self.series_index = _key_series(validated.values())
-            if rehosted:
-                print(f"[INFO] Repointed {rehosted} index entry(s) to {SITE_URL} (stored host no longer configured).")
-                logger.warning("Repointed %d index entry(s) to %s", rehosted, SITE_URL)
-
+                logger.info("No existing index found at %s", self.index_file)
+            self._remember_loaded()
+            return
+        try:
+            data = _read_index_json(self.index_file)
         except Exception as exc:  # pylint: disable=broad-exception-caught
-            print(f"[WARN] Error loading index: {exc}")
-            logger.error("Error loading index: %s", exc)
-            self.series_index = {}
+            self.unreadable = _describe_read_error(exc)
+            print(f"[ERROR] The index file could not be read: {self.unreadable}")
+            logger.error("Index file %s could not be read: %s", self.index_file, exc)
+            if self._restore_from_backup():
+                print(
+                    f"[INFO] Working from the newest readable backup instead: "
+                    f"{self.restored_from} ({len(self.series_index)} series)."
+                )
+                logger.warning("Loaded %s instead of the unreadable index", self.restored_from)
+            else:
+                print("[WARN] No readable backup either -- this session starts from an EMPTY index.")
+            print("       The unreadable file is left as it is; nothing is saved over it without asking you.")
+            self._remember_loaded()
+            return
+        self._apply_index_data(data)
+        self._remember_loaded()
+
+    def _apply_index_data(self, data):
+        """Take a parsed index file as this session's index.
+
+        Usable entries are keyed as usual. The rest are kept aside, reported,
+        and written back with the next save exactly as they were read: an
+        entry this module cannot use is still the user's data, and the place
+        to repair it is the file, not a silent delete.
+        """
+        usable, unusable = _split_index_entries(data)
+        rehosted = 0
+        for series in usable:
+            # An entry stored against a mirror that has since left _SITE_URLS
+            # keeps its data and gets its host rewritten. It used to be dropped
+            # here and then written out of the index by the next save.
+            moved = False
+            for field in ("url", "link"):
+                value = series.get(field)
+                if value:
+                    new_value, changed = _rehost_series_url(value)
+                    if changed:
+                        series[field] = new_value
+                        moved = True
+            rehosted += bool(moved)
+        key_of = _series_keyer(usable)
+        keyed = {}
+        for series in usable:
+            key = key_of(series)
+            if key in keyed:
+                # Same title and the same link twice. Keying used to keep only
+                # the later copy, so the next save deleted the other one.
+                unusable.append((keyed[key], "a second entry with the same title and link"))
+            keyed[key] = series
+        self.series_index = keyed
+        self.unusable_entries = [entry for entry, _ in unusable]
+        if rehosted:
+            print(f"[INFO] Repointed {rehosted} index entry(s) to {SITE_URL} (stored host no longer configured).")
+            logger.warning("Repointed %d index entry(s) to %s", rehosted, SITE_URL)
+        if unusable:
+            print(f"\n⚠ {len(unusable)} index entry(s) cannot be used and are kept in the file untouched:")
+            for entry, problem in unusable[:10]:
+                name = entry.get("title") if isinstance(entry, dict) else None
+                print(f"  • {name or '(no title)'} — {problem}")
+            if len(unusable) > 10:
+                print(f"  ... and {len(unusable) - 10} more")
+            print(f"  Repair or remove them by hand in {os.path.basename(self.index_file)}.")
+            logger.warning(
+                "%d unusable index entries kept untouched: %s",
+                len(unusable),
+                [problem for _, problem in unusable[:5]],
+            )
+
+    def _restore_from_backup(self):
+        """Load the newest backup holding a usable entry; return True if one was found.
+
+        Any backup that cannot be read is skipped the same way the index file
+        is, so one damaged generation never hides an older good one.
+        """
+        backup_dir = os.path.dirname(self.index_file)
+        filename = os.path.basename(self.index_file)
+        for i in range(1, 4):
+            backup_path = os.path.join(backup_dir, f"{filename}.bak{i}")
+            if not os.path.exists(backup_path):
+                continue
+            try:
+                data = _read_index_json(backup_path)
+            except Exception as exc:  # pylint: disable=broad-exception-caught
+                logger.warning("Backup %s also unreadable: %s", backup_path, exc)
+                continue
+            if not _split_index_entries(data)[0]:
+                # A readable backup holding nothing usable is not a restore.
+                # Returning it anyway ended the search here, so a truncated
+                # .bak1 hid a perfectly good .bak2 behind it.
+                logger.warning("Backup %s held no usable entries; trying the next", backup_path)
+                continue
+            self._apply_index_data(data)
+            self.restored_from = os.path.basename(backup_path)
+            return True
+        return False
+
+    def _remember_loaded(self):
+        """Note which series this session started from, for the save-time check."""
+        self._loaded_identities = frozenset(_series_identity(entry) for entry in self.series_index.values())
+
+    def _disk_change_lines(self):
+        """Describe how the index file now differs from what this session loaded."""
+        try:
+            on_disk = _split_index_entries(_read_index_json(self.index_file))[0]
+        except FileNotFoundError:
+            return ["  The file has been deleted since then."]
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+            return [f"  It cannot be read right now: {_describe_read_error(exc)}"]
+        disk_ids = {_series_identity(entry) for entry in on_disk}
+        lines = [f"  On disk now: {len(on_disk)} series. This session loaded {len(self._loaded_identities)}."]
+        for label, ids in (
+            ("on disk that this session never saw", disk_ids - self._loaded_identities),
+            ("this session loaded that are no longer on disk", self._loaded_identities - disk_ids),
+        ):
+            if ids:
+                titles = sorted(str(title) for title, _slug in ids)
+                more = f" ... and {len(titles) - 5} more" if len(titles) > 5 else ""
+                lines.append(f"  {len(titles)} series {label}: {', '.join(titles[:5])}{more}")
+        lines.append("  Series both copies hold may differ too (watched episodes).")
+        return lines
+
+    def _confirm_save_over_disk(self):
+        """Ask before a save replaces data this session never read; True to go ahead.
+
+        Two things put such data on disk. The file could not be read when it
+        was loaded, so this session worked from a backup or from nothing; or
+        it was rewritten after it was loaded -- by another run of this
+        program, a hand edit, or one of this module's own direct writes that
+        a long-lived manager missed. Either way the save would quietly write
+        over it, which is the one thing a save must not do. Nothing is
+        decided for the user: n, end of input or a run of unusable answers
+        leave the file exactly as it is.
+        """
+        if self.unreadable is None and _file_stamp(self.index_file) == self._disk_stamp:
+            return True
+        name = os.path.basename(self.index_file)
+        print()
+        if self.unreadable is not None:
+            print(term.danger(f"⚠ {name} could not be read when this session loaded it."))
+            print(f"  Reason: {self.unreadable}")
+            if self.restored_from:
+                print(f"  This session has been working from the backup {self.restored_from} instead.")
+            else:
+                print("  This session started from an EMPTY index instead.")
+            try:
+                readable_now = len(_split_index_entries(_read_index_json(self.index_file))[0])
+            except Exception:  # pylint: disable=broad-exception-caught
+                readable_now = None
+            if readable_now is None:
+                print(f"  It still cannot be read. Saving moves it to {name}.bak1 and writes this session's index.")
+            else:
+                print(f"  It can be read now and holds {readable_now} series this session never merged with.")
+        else:
+            print(term.danger(f"⚠ {name} has changed on disk since this session loaded it."))
+            print("  Another run of this program, or an editor, wrote to it in the meantime.")
+            for line in self._disk_change_lines():
+                print(line)
+        print(f"  Saving replaces it with this session's {len(self.series_index)} series: whatever only the")
+        print(f"  file holds is lost (the replaced file is kept as {name}.bak1 for three more saves).")
+        print("  Answer n to save nothing and leave the file as it is.")
+        return term.confirm(term.danger("Replace the index file anyway?") + term.dim(" (y/n): "))
 
     def save_index(self):
-        """Save series index to file atomically."""
+        """Save series index to file atomically; False if the user chose not to.
+
+        A save that would replace data this session never read asks first
+        (see _confirm_save_over_disk). Entries load_index could not use go
+        back into the file as they came.
+        """
+        if not self._confirm_save_over_disk():
+            print("✗ Not saved. The index file was left as it is.")
+            logger.warning("Index not saved: the file on disk was not what this session loaded")
+            return False
         self._save_index_unlocked()
+        # The file is now this session's own copy, whatever was there before.
+        self.unreadable = None
+        self._disk_stamp = _file_stamp(self.index_file)
+        self._remember_loaded()
+        return True
 
     def _reconcile_derived_counts(self):
         """Force every derived count in the index to agree with its episodes.
@@ -3298,6 +3567,7 @@ class IndexManager:
         try:
             self._reconcile_derived_counts()
             series_list = [_order_series_entry(series) for series in self.series_index.values()]
+            series_list += list(self.unusable_entries)
             _atomic_write_json(self.index_file, series_list)
             logger.info("Saved index with %d series", len(self.series_index))
         except Exception as exc:  # pylint: disable=broad-exception-caught

@@ -22,7 +22,7 @@ import re
 import pytest
 
 import main
-from tests._support import captured_output, scripted_input
+from tests._support import captured_output, scripted_input, series
 
 
 @pytest.fixture
@@ -188,3 +188,118 @@ class TestShowMenu:
         """A gap means an option was removed and the rest never renumbered."""
         options = self._options()
         assert options == set(range(max(options) + 1)), f"menu numbering is not contiguous: {sorted(options)}"
+
+
+class _RecordingScraper:
+    """Stands in for the scraper class _run_scrape_and_save builds; records each run."""
+
+    made: list = []
+
+    def __init__(self):
+        self.series_data = []
+        self.all_discovered_series = None
+        self.failed_links = []
+        self.paused = False
+        self.checkpointing = True
+        self.site_url = ""
+        self.kwargs = None
+        type(self).made.append(self)
+
+    def run(self, **kwargs):
+        self.kwargs = kwargs
+        self.checkpointing = kwargs.get("checkpoint", True) and not kwargs.get("single_url")
+        if len(type(self).made) == 1:
+            self.series_data = [series("Outer")]
+
+    @staticmethod
+    def get_series_slug_from_url(url):
+        return url.rstrip("/").rsplit("/", 1)[-1]
+
+    def clear_checkpoint(self):
+        pass
+
+
+class TestNestedRunsLeaveTheCheckpointAlone:
+    """A rescrape started from inside a run used to own the checkpoint file too.
+
+    The integrity dialog's rescrape runs as a url_list scrape inside
+    _run_scrape_and_save. It checkpointed as a "batch" run and main.py cleared
+    the file afterwards, so a paused run's checkpoint vanished while the outer
+    call went on to report it preserved.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _fakes(self, monkeypatch):
+        _RecordingScraper.made = []
+        rescrape = {"action": "rescrape", "urls": ["https://x.test/v"], "titles": ["V"], "series": [series("V")]}
+        answers = [(rescrape, {})]
+        self.replaced = []
+        for name, value in (
+            ("BsToScraper", _RecordingScraper),
+            ("ACTIVE_SITE_URL", "https://x.test"),
+            ("confirm_and_save_changes", lambda *_a, **_k: answers.pop(0) if answers else (True, {})),
+            ("replace_critical_series", lambda *args: self.replaced.append(args) or (0, 0)),
+            ("print_scraped_series_status", lambda *_a, **_k: None),
+            ("_notify_vanished_at_startup", lambda *_a, **_k: None),
+        ):
+            monkeypatch.setattr(main, name, value)
+
+    def test_the_integrity_rescrape_keeps_no_checkpoint(self):
+        with captured_output():
+            main._run_scrape_and_save(run_kwargs={"url_list": ["u"]}, description="d", success_msg="s", no_data_msg="n")
+        nested = _RecordingScraper.made[1]
+        assert nested.kwargs["checkpoint"] is False
+
+    def test_what_the_integrity_rescrape_reads_is_offered_as_a_replacement(self, monkeypatch):
+        """The critical series used to be deleted before the rescrape even ran."""
+
+        class Rereads(_RecordingScraper):
+            def run(self, **kwargs):
+                super().run(**kwargs)
+                if len(type(self).made) == 2:
+                    self.series_data = [series("V")]
+
+        monkeypatch.setattr(main, "BsToScraper", Rereads)
+        with captured_output():
+            main._run_scrape_and_save(run_kwargs={"url_list": ["u"]}, description="d", success_msg="s", no_data_msg="n")
+        assert len(self.replaced) == 1
+        entries, fresh, _path = self.replaced[0]
+        assert [entry["title"] for entry in entries] == ["V"]
+        assert [entry["title"] for entry in fresh] == ["V"]
+
+    def test_an_integrity_rescrape_that_reads_nothing_replaces_nothing(self):
+        with captured_output() as out:
+            main._run_scrape_and_save(run_kwargs={"url_list": ["u"]}, description="d", success_msg="s", no_data_msg="n")
+        assert self.replaced == []
+        assert "stay in the index unchanged" in out.getvalue()
+
+    def test_a_run_of_nothing_but_failures_is_not_saved_as_a_success(self, monkeypatch):
+        """The S.to sibling gated on the raw list, so a run whose every series failed still saved and said so."""
+        saved = []
+
+        class OnlyFailures(_RecordingScraper):
+            def run(self, **kwargs):
+                super().run(**kwargs)
+                self.series_data = [{**series("Failed"), "_error": True}]
+
+        monkeypatch.setattr(main, "BsToScraper", OnlyFailures)
+        monkeypatch.setattr(main, "confirm_and_save_changes", lambda *args, **_k: saved.append(args) or (True, {}))
+        with captured_output() as out:
+            main._run_scrape_and_save(run_kwargs={"url_list": ["u"]}, description="d", success_msg="s", no_data_msg="n")
+        assert saved == []
+        assert "✓ s" not in out.getvalue()
+
+    def test_a_paused_run_that_kept_no_checkpoint_does_not_claim_one(self, monkeypatch):
+        class Paused(_RecordingScraper):
+            def run(self, **kwargs):
+                super().run(**kwargs)
+                self.series_data = []
+                self.paused = True
+
+        monkeypatch.setattr(main, "BsToScraper", Paused)
+        with captured_output() as out:
+            main._run_scrape_and_save(
+                run_kwargs={"single_url": "https://x.test/one"}, description="d", success_msg="s", no_data_msg="n"
+            )
+        assert "keeps no checkpoint" in out.getvalue()
+        assert "checkpoint preserved" not in out.getvalue()
