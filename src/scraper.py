@@ -2886,23 +2886,35 @@ class BsToScraper:  # pylint: disable=too-many-instance-attributes
         series_list = []
         seen_keys: set[str] = set()
         for u in url_list:
-            main_url = self.normalize_to_series_url(u)
-            m = _SERIE_PATH_RE.search(main_url)
-            link = m.group(1) if m else main_url
-            slug = slug_key(self.get_series_slug_from_url(link))
-            key = slug if slug and slug != "unknown" else (slug_key(main_url) or main_url)
+            key, entry = self._batch_entry(u)
             if key in seen_keys:
                 continue
             seen_keys.add(key)
-            series_list.append(
-                {
-                    "title": main_url.split("/")[-1],
-                    "link": link,
-                    "url": main_url,
-                    "scrape_url": main_url,
-                }
-            )
+            series_list.append(entry)
         return series_list
+
+    def batch_series_key(self, url):
+        """The key _series_list_from_urls collapses a batch line by.
+
+        Two lines with the same key name one series. main.py deletes duplicate
+        lines from the batch file by this key, so the file and the scrape
+        cannot disagree about what a duplicate is.
+        """
+        return self._batch_entry(url)[0]
+
+    def _batch_entry(self, url):
+        """(key, series entry) for one batch line; see batch_series_key."""
+        main_url = self.normalize_to_series_url(url)
+        m = _SERIE_PATH_RE.search(main_url)
+        link = m.group(1) if m else main_url
+        slug = slug_key(self.get_series_slug_from_url(link))
+        key = slug if slug and slug != "unknown" else (slug_key(main_url) or main_url)
+        return key, {
+            "title": main_url.split("/")[-1],
+            "link": link,
+            "url": main_url,
+            "scrape_url": main_url,
+        }
 
     async def _run_url_list(self, tmp, url_list):
         """Scrape a batch of series from a URL list."""
